@@ -1,0 +1,6 @@
+dash>=4.1.0
+plotly>=6.7.0
+pandas>=3.0.2
+numpy>=2.4.4
+certifi>=2026.4.22
+reportlab>=4.0.0
