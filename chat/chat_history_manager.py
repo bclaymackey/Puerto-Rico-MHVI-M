@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 
 from .chat_db import get_chat_db_connection
 from .lexical_search import search_cross_session_memory
@@ -12,12 +13,31 @@ _CROSS_SESSION_MESSAGE_WINDOW = 40
 
 
 def _append_row(session_id: str, role: str, content: str) -> None:
+    event_at = datetime.utcnow().isoformat()
+    auto_title = re.sub(r"\s+", " ", (content or "").strip())[:80].rstrip()
     conn = get_chat_db_connection()
     try:
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            (session_id, role, content, datetime.utcnow().isoformat()),
+            (session_id, role, content, event_at),
         )
+        conn.execute(
+            "UPDATE sessions SET updated_at = ? WHERE id = ?",
+            (event_at, session_id),
+        )
+        if role == "user" and auto_title:
+            conn.execute(
+                """
+                UPDATE sessions
+                SET auto_title = CASE
+                    WHEN COALESCE(NULLIF(TRIM(custom_title), ''), NULLIF(TRIM(auto_title), '')) IS NULL
+                    THEN ?
+                    ELSE auto_title
+                END
+                WHERE id = ?
+                """,
+                (auto_title, session_id),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -81,12 +101,25 @@ def get_history_for_display(session_id: str) -> list[dict]:
     conn = get_chat_db_connection()
     try:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id",
+            """
+            SELECT id, role, content, timestamp
+            FROM messages
+            WHERE session_id = ?
+            ORDER BY id
+            """,
             (session_id,),
         ).fetchall()
     finally:
         conn.close()
-    return [{"role": role, "text": content} for role, content in rows]
+    return [
+        {
+            "id": message_id,
+            "role": role,
+            "text": content,
+            "timestamp": timestamp,
+        }
+        for message_id, role, content, timestamp in rows
+    ]
 
 
 def clear_session(session_id: str) -> None:

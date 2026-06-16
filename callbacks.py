@@ -9,11 +9,14 @@ import pandas as pd
 import numpy as np
 from chat import (
     build_pdf_bytes,
-    clear_session,
     consume_report,
+    delete_session,
     get_history_for_display,
+    get_session_title,
     list_user_sessions,
     process_chat_message,
+    rename_session,
+    search_user_conversations,
     set_user_name,
 )
 
@@ -281,65 +284,146 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         Input('chat-resize-handle', 'id'),
     )
 
-    def _user_bubble(text):
-        return html.Div(
-            html.Div(
-                text,
-                style={
-                    'backgroundColor': '#4b0082', 'color': 'white',
-                    'padding': '8px 12px',
-                    'borderRadius': '16px 16px 4px 16px',
-                    'maxWidth': '75%', 'wordWrap': 'break-word'
-                }
+    def _format_message_timestamp(timestamp_value):
+        if not timestamp_value:
+            return ''
+        try:
+            return datetime.fromisoformat(timestamp_value).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            return str(timestamp_value).replace('T', ' ')[:16]
+
+    def _bubble_container(
+        *,
+        body_children,
+        role,
+        language='en',
+        timestamp=None,
+        message_id=None,
+        highlight=False,
+        copy_text=None,
+    ):
+        is_user = role == 'user'
+        meta_children = []
+        if timestamp:
+            meta_children.append(
+                html.Span(
+                    _format_message_timestamp(timestamp),
+                    style={'fontSize': '10px', 'opacity': '0.72'},
+                )
+            )
+        if copy_text and not is_user:
+            meta_children.append(
+                dcc.Clipboard(
+                    content=copy_text,
+                    title='Copiar mensaje' if language == 'es' else 'Copy message',
+                    style={
+                        'fontSize': '12px',
+                        'cursor': 'pointer',
+                        'color': '#4b0082',
+                    },
+                )
+            )
+
+        bubble_children = []
+        if meta_children:
+            bubble_children.append(
+                html.Div(
+                    meta_children,
+                    style={
+                        'display': 'flex',
+                        'alignItems': 'center',
+                        'justifyContent': 'space-between',
+                        'marginBottom': '6px',
+                        'gap': '8px',
+                    },
+                )
+            )
+        bubble_children.extend(body_children)
+
+        bubble_style = {
+            'padding': '10px 12px',
+            'borderRadius': (
+                '16px 16px 4px 16px'
+                if is_user
+                else '16px 16px 16px 4px'
             ),
-            style={'display': 'flex', 'justifyContent': 'flex-end', 'marginBottom': '6px'}
+            'maxWidth': '82%',
+            'wordWrap': 'break-word',
+            'whiteSpace': 'pre-wrap',
+            'backgroundColor': '#4b0082' if is_user else '#f5f0fb',
+            'color': 'white' if is_user else '#2f2540',
+            'border': '1px solid #d9c7f0' if not is_user else 'none',
+            'boxShadow': (
+                '0 0 0 2px rgba(75, 0, 130, 0.18)'
+                if highlight
+                else 'none'
+            ),
+        }
+
+        container_kwargs = {
+            'style': {
+                'display': 'flex',
+                'justifyContent': 'flex-end' if is_user else 'flex-start',
+                'marginBottom': '8px',
+            },
+        }
+        if message_id:
+            container_kwargs['id'] = f'chat-message-{message_id}'
+
+        return html.Div(
+            html.Div(bubble_children, style=bubble_style),
+            **container_kwargs,
         )
 
-    def _ai_bubble(text):
-        return html.Div(
-            html.Div(
-                text,
-                style={
-                    'backgroundColor': '#f0f0f0', 'color': '#333',
-                    'padding': '8px 12px',
-                    'borderRadius': '16px 16px 16px 4px',
-                    'maxWidth': '75%', 'wordWrap': 'break-word'
-                }
-            ),
-            style={'display': 'flex', 'justifyContent': 'flex-start', 'marginBottom': '6px'}
+    def _user_bubble(text, timestamp=None, message_id=None, language='en', highlight=False):
+        return _bubble_container(
+            body_children=[html.Div(text)],
+            role='user',
+            language=language,
+            timestamp=timestamp,
+            message_id=message_id,
+            highlight=highlight,
+        )
+
+    def _ai_bubble(text, timestamp=None, message_id=None, language='en', highlight=False):
+        return _bubble_container(
+            body_children=[html.Div(text)],
+            role='assistant',
+            language=language,
+            timestamp=timestamp,
+            message_id=message_id,
+            highlight=highlight,
+            copy_text=text,
         )
 
     # v1: one outstanding report at a time. The button id is fixed; clicking
     # always downloads whichever report is currently pinned in `pending-report`.
-    def _report_bubble(message, language):
+    def _report_bubble(message, language, timestamp=None, message_id=None, highlight=False):
         btn_label = 'Descargar informe' if language == 'es' else 'Download report'
-        return html.Div(
-            html.Div(
-                [
-                    html.Div(message, style={'marginBottom': '8px'}),
-                    html.Button(
-                        btn_label,
-                        id='download-report-btn',
-                        n_clicks=0,
-                        style={
-                            'fontSize': '12px',
-                            'padding': '6px 12px',
-                            'border': '1px solid #4b0082',
-                            'borderRadius': '6px',
-                            'background': '#4b0082',
-                            'color': 'white',
-                            'cursor': 'pointer',
-                        },
-                    ),
-                ],
-                style={
-                    'backgroundColor': '#f0f0f0', 'color': '#333',
-                    'padding': '10px 14px',
-                    'borderRadius': '16px 16px 16px 4px',
-                    'maxWidth': '75%', 'wordWrap': 'break-word',
-                },
-            ),
-            style={'display': 'flex', 'justifyContent': 'flex-start', 'marginBottom': '6px'},
+        return _bubble_container(
+            body_children=[
+                html.Div(message, style={'marginBottom': '8px'}),
+                html.Button(
+                    btn_label,
+                    id='download-report-btn',
+                    n_clicks=0,
+                    style={
+                        'fontSize': '12px',
+                        'padding': '6px 12px',
+                        'border': '1px solid #4b0082',
+                        'borderRadius': '6px',
+                        'background': '#4b0082',
+                        'color': 'white',
+                        'cursor': 'pointer',
+                    },
+                ),
+            ],
+            role='assistant',
+            language=language,
+            timestamp=timestamp,
+            message_id=message_id,
+            highlight=highlight,
+            copy_text=message,
         )
 
     def _typing_bubble():
@@ -426,102 +510,318 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             }
         )
 
-    @app.callback(
-        [Output('chat-sessions-panel', 'style'),
-         Output('chat-sessions-panel', 'children')],
-        Input('chat-sessions-btn', 'n_clicks'),
-        State('chat-sessions-panel', 'style'),
-        State('chat-user-id', 'data'),
-        State('chat-session-id', 'data'),
+    def _render_history_messages(history, language, highlight_message_id=None):
+        messages = []
+        for item in history:
+            message_id = item.get('id')
+            highlighted = bool(highlight_message_id and message_id == highlight_message_id)
+            if item.get('role') == 'user':
+                messages.append(
+                    _user_bubble(
+                        item.get('text', ''),
+                        timestamp=item.get('timestamp'),
+                        message_id=message_id,
+                        language=language,
+                        highlight=highlighted,
+                    )
+                )
+            else:
+                messages.append(
+                    _ai_bubble(
+                        item.get('text', ''),
+                        timestamp=item.get('timestamp'),
+                        message_id=message_id,
+                        language=language,
+                        highlight=highlighted,
+                    )
+                )
+        return messages or [_welcome_bubble(language)]
+
+    def _session_meta_label(session, language):
+        timestamp_value = session.get('updated_at') or session.get('created_at')
+        timestamp_label = _format_message_timestamp(timestamp_value)
+        message_label = 'mensajes' if language == 'es' else 'messages'
+        return f"{timestamp_label} · {session.get('message_count', 0)} {message_label}"
+
+    def _render_session_rows(sessions, active_session_id, language, search_value):
+        if not sessions:
+            empty_text = 'No saved chats.' if language != 'es' else 'No hay chats guardados.'
+            return [
+                html.Div(
+                    empty_text,
+                    style={
+                        'padding': '10px 8px',
+                        'borderRadius': '10px',
+                        'background': 'rgba(255,255,255,0.08)',
+                        'color': '#efe7f8',
+                        'fontSize': '12px',
+                    },
+                )
+            ]
+
+        rows = []
+        has_search = bool((search_value or '').strip())
+        for session in sessions:
+            is_active = session['id'] == active_session_id
+            preview = session.get('match_preview') if has_search else None
+            meta_text = _session_meta_label(session, language)
+            body_children = [
+                html.Div(
+                    session['title'][:80],
+                    style={
+                        'fontWeight': '700',
+                        'fontSize': '13px',
+                        'color': '#2d1447',
+                        'marginBottom': '4px',
+                    },
+                ),
+            ]
+            if preview:
+                body_children.append(
+                    html.Div(
+                        preview[:120],
+                        style={
+                            'fontSize': '11px',
+                            'color': '#5b486f',
+                            'marginBottom': '5px',
+                        },
+                    )
+                )
+            body_children.append(
+                html.Div(
+                    meta_text,
+                    style={'fontSize': '11px', 'color': '#755f8e'},
+                )
+            )
+
+            rows.append(
+                html.Div(
+                    [
+                        html.Button(
+                            body_children,
+                            id={
+                                'type': 'chat-session-button',
+                                'session_id': session['id'],
+                                'message_id': session.get('match_message_id') or 0,
+                            },
+                            n_clicks=0,
+                            style={
+                                'flex': '1',
+                                'padding': '10px',
+                                'textAlign': 'left',
+                                'border': 'none',
+                                'background': 'transparent',
+                                'cursor': 'pointer',
+                            },
+                        ),
+                        html.Div(
+                            [
+                                html.Button(
+                                    'Rename' if language != 'es' else 'Renombrar',
+                                    id={
+                                        'type': 'chat-session-rename-btn',
+                                        'session_id': session['id'],
+                                    },
+                                    n_clicks=0,
+                                    title='Rename conversation' if language != 'es' else 'Renombrar conversación',
+                                    style={
+                                        'fontSize': '11px',
+                                        'padding': '5px 7px',
+                                        'borderRadius': '8px',
+                                        'border': '1px solid #d2c1e8',
+                                        'background': 'white',
+                                        'color': '#4b0082',
+                                        'cursor': 'pointer',
+                                    },
+                                ),
+                                html.Button(
+                                    'Delete' if language != 'es' else 'Borrar',
+                                    id={
+                                        'type': 'chat-session-delete-btn',
+                                        'session_id': session['id'],
+                                    },
+                                    n_clicks=0,
+                                    title='Delete conversation' if language != 'es' else 'Borrar conversación',
+                                    style={
+                                        'fontSize': '11px',
+                                        'padding': '5px 7px',
+                                        'borderRadius': '8px',
+                                        'border': '1px solid #efc3cd',
+                                        'background': '#fff6f8',
+                                        'color': '#a43d56',
+                                        'cursor': 'pointer',
+                                    },
+                                ),
+                            ],
+                            style={
+                                'display': 'flex',
+                                'flexDirection': 'column',
+                                'gap': '6px',
+                                'padding': '10px 10px 10px 0',
+                            },
+                        ),
+                    ],
+                    style={
+                        'display': 'flex',
+                        'alignItems': 'stretch',
+                        'marginBottom': '8px',
+                        'borderRadius': '12px',
+                        'background': '#f5effd' if is_active else 'rgba(255,255,255,0.95)',
+                        'border': '1px solid #cbb4e8' if is_active else '1px solid rgba(255,255,255,0.3)',
+                        'boxShadow': '0 6px 14px rgba(19, 8, 35, 0.08)',
+                    },
+                )
+            )
+        return rows
+
+    app.clientside_callback(
+        """
+        function(target) {
+            if (!target || !target.message_id) {
+                return window.dash_clientside.no_update;
+            }
+            window.setTimeout(function() {
+                var node = document.getElementById('chat-message-' + target.message_id);
+                if (node) {
+                    node.scrollIntoView({behavior: 'smooth', block: 'center'});
+                }
+            }, 80);
+            return '';
+        }
+        """,
+        Output('chat-scroll-anchor', 'children'),
+        Input('chat-scroll-target', 'data'),
         prevent_initial_call=True,
     )
-    def toggle_chat_sessions(n_clicks, current_style, user_id, active_session_id):
-        if not n_clicks:
-            return dash.no_update, dash.no_update
-        if (current_style or {}).get('display') != 'none':
-            return {'display': 'none'}, dash.no_update
 
-        sessions = list_user_sessions(user_id)
-        buttons = [
-            html.Button(
-                [
-                    html.Div(
-                        session['title'][:70],
-                        style={
-                            'fontWeight': '600',
-                            'marginBottom': '4px',
-                            'overflow': 'hidden',
-                            'textOverflow': 'ellipsis',
-                            'whiteSpace': 'nowrap',
-                        },
-                    ),
-                    html.Div(
-                        (
-                            f"{session['created_at'][:10]} at "
-                            f"{session['created_at'][11:16]} · "
-                            f"{session['message_count']} messages"
-                        ),
-                        style={'fontSize': '11px', 'color': '#666'},
-                    ),
-                ],
-                id={'type': 'chat-session-button', 'session_id': session['id']},
-                n_clicks=0,
-                style={
-                    'width': '100%',
-                    'padding': '8px',
-                    'marginBottom': '5px',
-                    'textAlign': 'left',
-                    'border': (
-                        '1px solid #4b0082'
-                        if session['id'] == active_session_id
-                        else '1px solid #ddd'
-                    ),
-                    'borderRadius': '6px',
-                    'background': (
-                        '#f2eafa' if session['id'] == active_session_id else 'white'
-                    ),
-                    'cursor': 'pointer',
+    @app.callback(
+        Output('chat-sessions-open', 'data'),
+        Input('chat-sessions-btn', 'n_clicks'),
+        State('chat-sessions-open', 'data'),
+        prevent_initial_call=True,
+    )
+    def toggle_chat_sessions(n_clicks, is_open):
+        if not n_clicks:
+            return dash.no_update
+        return not bool(is_open)
+
+    @app.callback(
+        [Output('chat-sessions-panel', 'style'),
+         Output('chat-messages-container', 'style'),
+         Output('chat-input-row', 'style')],
+        Input('chat-sessions-open', 'data'),
+    )
+    def sync_sessions_panel_layout(is_open):
+        if is_open:
+            return (
+                {
+                    'display': 'flex',
+                    'flex': '1',
+                    'flexDirection': 'column',
+                    'minHeight': '0',
+                    'marginBottom': '10px',
+                    'padding': '12px',
+                    'borderRadius': '12px',
+                    'background': 'linear-gradient(180deg, #33104e 0%, #5b2c83 100%)',
+                    'boxShadow': '0 12px 24px rgba(22, 7, 39, 0.18)',
                 },
+                {'display': 'none'},
+                {'display': 'none'},
             )
-            for session in sessions
-        ]
-        children = [
-            html.Div(
-                'Your chats',
-                style={
-                    'fontWeight': '700',
-                    'fontSize': '12px',
-                    'padding': '3px 2px 8px',
-                    'color': '#4b0082',
-                },
-            ),
-            *(
-                buttons
-                or [
-                    html.Div(
-                        'No saved chats.',
-                        style={'padding': '8px', 'color': '#666', 'fontSize': '12px'},
-                    )
-                ]
-            ),
-        ]
-        return {
-            'display': 'block',
-            'maxHeight': '220px',
-            'overflowY': 'auto',
-            'padding': '8px',
-            'marginBottom': '6px',
-            'border': '1px solid #eee',
-            'borderRadius': '6px',
-            'background': '#fafafa',
-        }, children
+
+        return (
+            {'display': 'none'},
+            {
+                'display': 'flex',
+                'flex': '1',
+                'minHeight': '0',
+                'marginBottom': '10px',
+            },
+            {
+                'display': 'flex',
+                'alignItems': 'center',
+                'border': '1px solid #ddd',
+                'borderRadius': '20px',
+                'padding': '5px 10px',
+                'backgroundColor': '#f9f9f9',
+            },
+        )
+
+    @app.callback(
+        Output('chat-sessions-list', 'children'),
+        [Input('chat-sessions-open', 'data'),
+         Input('chat-history-tick', 'data'),
+         Input('chat-session-search', 'value'),
+         Input('chat-language', 'data')],
+        [State('chat-user-id', 'data'),
+         State('chat-session-id', 'data')],
+    )
+    def render_chat_sessions(is_open, _tick, search_value, language, user_id, active_session_id):
+        if not is_open:
+            return dash.no_update
+        language = language or 'en'
+        sessions = (
+            search_user_conversations(user_id, search_value or '')
+            if (search_value or '').strip()
+            else list_user_sessions(user_id)
+        )
+        return _render_session_rows(sessions, active_session_id, language, search_value or '')
+
+    @app.callback(
+        [Output('chat-session-rename-row', 'style'),
+         Output('chat-session-rename-input', 'value')],
+        Input('chat-rename-session-id', 'data'),
+    )
+    def sync_rename_row(session_id):
+        if not session_id:
+            return {'display': 'none'}, ''
+        return (
+            {
+                'display': 'flex',
+                'alignItems': 'center',
+                'gap': '8px',
+            },
+            get_session_title(session_id),
+        )
+
+    @app.callback(
+        Output('chat-rename-session-id', 'data'),
+        Input({'type': 'chat-session-rename-btn', 'session_id': ALL}, 'n_clicks'),
+        prevent_initial_call=True,
+    )
+    def open_rename_session(clicks):
+        triggered = dash.ctx.triggered_id
+        click_value = dash.ctx.triggered[0].get('value') if dash.ctx.triggered else 0
+        if not isinstance(triggered, dict) or not click_value:
+            return dash.no_update
+        return triggered.get('session_id')
+
+    @app.callback(
+        [Output('chat-rename-session-id', 'data', allow_duplicate=True),
+         Output('chat-history-tick', 'data', allow_duplicate=True)],
+        [Input('chat-session-rename-save-btn', 'n_clicks'),
+         Input('chat-session-rename-cancel-btn', 'n_clicks')],
+        [State('chat-rename-session-id', 'data'),
+         State('chat-session-rename-input', 'value'),
+         State('chat-history-tick', 'data')],
+        prevent_initial_call=True,
+    )
+    def handle_session_rename(save_clicks, cancel_clicks, session_id, title, tick):
+        trigger_id = dash.ctx.triggered_id
+        if trigger_id == 'chat-session-rename-cancel-btn':
+            return None, dash.no_update
+        if trigger_id == 'chat-session-rename-save-btn' and save_clicks and session_id:
+            rename_session(session_id, title)
+            return None, (tick or 0) + 1
+        return dash.no_update, dash.no_update
 
     @app.callback(
         [Output('chat-session-id', 'data', allow_duplicate=True),
          Output('chat-messages', 'children', allow_duplicate=True),
-         Output('chat-sessions-panel', 'style', allow_duplicate=True),
+         Output('chat-sessions-open', 'data', allow_duplicate=True),
+         Output('chat-scroll-target', 'data'),
          Output('chat-history-tick', 'data', allow_duplicate=True)],
-        Input({'type': 'chat-session-button', 'session_id': ALL}, 'n_clicks'),
+        Input({'type': 'chat-session-button', 'session_id': ALL, 'message_id': ALL}, 'n_clicks'),
         State('chat-language', 'data'),
         State('chat-history-tick', 'data'),
         prevent_initial_call=True,
@@ -529,29 +829,61 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
     def load_chat_session(clicks, language, history_tick):
         triggered = dash.ctx.triggered_id
         click_value = dash.ctx.triggered[0].get('value') if dash.ctx.triggered else 0
-        if (
-            not isinstance(triggered, dict)
-            or not click_value
-            or not any(clicks or [])
-        ):
-            return (dash.no_update,) * 4
+        if not isinstance(triggered, dict) or not click_value or not any(clicks or []):
+            return (dash.no_update,) * 5
 
         session_id = triggered.get('session_id')
+        target_message_id = triggered.get('message_id') or None
         history = get_history_for_display(session_id)
-        messages = [
-            _user_bubble(item['text'])
-            if item['role'] == 'user'
-            else _ai_bubble(item['text'])
-            for item in history
-        ]
-        if not messages:
-            messages = [_welcome_bubble(language or 'en')]
-
         return (
             session_id,
-            messages,
-            {'display': 'none'},
+            _render_history_messages(history, language or 'en', target_message_id),
+            False,
+            (
+                {'message_id': target_message_id, 'token': str(uuid.uuid4())}
+                if target_message_id
+                else None
+            ),
             (history_tick or 0) + 1,
+        )
+
+    @app.callback(
+        [Output('chat-session-id', 'data', allow_duplicate=True),
+         Output('chat-messages', 'children', allow_duplicate=True),
+         Output('chat-history-tick', 'data', allow_duplicate=True),
+         Output('chat-rename-session-id', 'data', allow_duplicate=True),
+         Output('pending-report', 'data', allow_duplicate=True)],
+        Input({'type': 'chat-session-delete-btn', 'session_id': ALL}, 'n_clicks'),
+        [State('chat-session-id', 'data'),
+         State('chat-language', 'data'),
+         State('chat-history-tick', 'data'),
+         State('chat-user-id', 'data')],
+        prevent_initial_call=True,
+    )
+    def remove_chat_session(clicks, active_session_id, language, tick, user_id):
+        triggered = dash.ctx.triggered_id
+        click_value = dash.ctx.triggered[0].get('value') if dash.ctx.triggered else 0
+        if not isinstance(triggered, dict) or not click_value:
+            return (dash.no_update,) * 5
+
+        session_id = triggered.get('session_id')
+        delete_session(session_id, user_id)
+
+        if session_id == active_session_id:
+            return (
+                str(uuid.uuid4()),
+                [_welcome_bubble(language or 'en')],
+                (tick or 0) + 1,
+                None,
+                None,
+            )
+
+        return (
+            dash.no_update,
+            dash.no_update,
+            (tick or 0) + 1,
+            None,
+            dash.no_update,
         )
 
     @app.callback(
@@ -559,29 +891,73 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('language-selection', 'style'),
          Output('chat-interface', 'style'),
          Output('chat-messages', 'children'),
-         Output('chat-history-tick', 'data', allow_duplicate=True)],
-        [Input('lang-en-btn', 'n_clicks'),
-         Input('lang-es-btn', 'n_clicks')],
-        State('chat-session-id', 'data'),
-        State('chat-history-tick', 'data'),
-        prevent_initial_call=True
+         Output('chat-remember-language', 'value')],
+        Input('chat-language-preference', 'modified_timestamp'),
+        [State('chat-language-preference', 'data'),
+         State('chat-language', 'data')],
     )
-    def select_language(en_clicks, es_clicks, session_id, tick):
-        trigger_id = dash.ctx.triggered_id
-        if trigger_id not in ('lang-en-btn', 'lang-es-btn'):
-            return (dash.no_update, dash.no_update, dash.no_update,
-                    dash.no_update, dash.no_update)
+    def apply_saved_language(_modified, preference, current_language):
+        if current_language or not preference or not preference.get('language'):
+            return (dash.no_update,) * 5
 
-        language = 'es' if trigger_id == 'lang-es-btn' else 'en'
-
-        if session_id:
-            clear_session(session_id)
-
+        language = preference['language']
         return (
             language,
             {'display': 'none'},
             {'display': 'flex', 'flex': '1', 'flexDirection': 'column', 'minHeight': '0'},
             [_welcome_bubble(language)],
+            ['remember'],
+        )
+
+    @app.callback(
+        [Output('chat-language', 'data', allow_duplicate=True),
+         Output('chat-language-preference', 'data'),
+         Output('language-selection', 'style', allow_duplicate=True),
+         Output('chat-interface', 'style', allow_duplicate=True),
+         Output('chat-messages', 'children', allow_duplicate=True),
+         Output('chat-history-tick', 'data', allow_duplicate=True)],
+        [Input('lang-en-btn', 'n_clicks'),
+         Input('lang-es-btn', 'n_clicks')],
+        [State('chat-remember-language', 'value'),
+         State('chat-history-tick', 'data')],
+        prevent_initial_call=True,
+    )
+    def select_language(en_clicks, es_clicks, remember_value, tick):
+        trigger_id = dash.ctx.triggered_id
+        if trigger_id not in ('lang-en-btn', 'lang-es-btn'):
+            return (dash.no_update,) * 6
+
+        language = 'es' if trigger_id == 'lang-es-btn' else 'en'
+        preference = {'language': language} if 'remember' in (remember_value or []) else None
+
+        return (
+            language,
+            preference,
+            {'display': 'none'},
+            {'display': 'flex', 'flex': '1', 'flexDirection': 'column', 'minHeight': '0'},
+            [_welcome_bubble(language)],
+            (tick or 0) + 1,
+        )
+
+    @app.callback(
+        [Output('chat-session-id', 'data', allow_duplicate=True),
+         Output('chat-messages', 'children', allow_duplicate=True),
+         Output('chat-sessions-open', 'data', allow_duplicate=True),
+         Output('pending-report', 'data', allow_duplicate=True),
+         Output('chat-history-tick', 'data', allow_duplicate=True)],
+        Input('chat-new-session-btn', 'n_clicks'),
+        [State('chat-language', 'data'),
+         State('chat-history-tick', 'data')],
+        prevent_initial_call=True,
+    )
+    def start_new_chat_session(n_clicks, language, tick):
+        if not n_clicks:
+            return (dash.no_update,) * 5
+        return (
+            str(uuid.uuid4()),
+            [_welcome_bubble(language or 'en')],
+            False,
+            None,
             (tick or 0) + 1,
         )
 
@@ -593,13 +969,13 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('chat-history-tick', 'data', allow_duplicate=True)],
         [Input('chat-send-btn', 'n_clicks'),
          Input('chat-input', 'n_submit')],
-        State('chat-input', 'value'),
-        State('chat-messages', 'children'),
-        State('chat-language', 'data'),
-        State('chat-session-id', 'data'),
-        State('chat-user-id', 'data'),
-        State('chat-history-tick', 'data'),
-        prevent_initial_call=True
+        [State('chat-input', 'value'),
+         State('chat-messages', 'children'),
+         State('chat-language', 'data'),
+         State('chat-session-id', 'data'),
+         State('chat-user-id', 'data'),
+         State('chat-history-tick', 'data')],
+        prevent_initial_call=True,
     )
     def show_user_message(
         n_clicks, n_submit, user_input, messages, language, session_id, user_id,
@@ -609,18 +985,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             return (dash.no_update,) * 5
 
         command = user_input.strip().lower()
-        if command == '/new':
-            if session_id:
-                clear_session(session_id)
-            return (
-                [_welcome_bubble(language or 'en')],
-                '',
-                None,
-                dash.no_update,
-                (history_tick or 0) + 1,
-            )
-
-        if command == '/session':
+        if command in {'/new', '/session'}:
             return (
                 [_welcome_bubble(language or 'en')],
                 '',
@@ -646,17 +1011,28 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                     else f'Entendido, {name}. Recordaré tu nombre en este dispositivo.'
                 )
             return (
-                [*(messages or []), _ai_bubble(message)],
+                [
+                    *(messages or []),
+                    _ai_bubble(
+                        message,
+                        timestamp=datetime.utcnow().isoformat(),
+                        language=language or 'en',
+                    ),
+                ],
                 '',
                 None,
                 dash.no_update,
                 dash.no_update,
             )
 
-        if messages is None:
-            messages = []
-
-        messages.append(_user_bubble(user_input))
+        messages = list(messages or [])
+        messages.append(
+            _user_bubble(
+                user_input,
+                timestamp=datetime.utcnow().isoformat(),
+                language=language or 'en',
+            )
+        )
         messages.append(_typing_bubble())
 
         return (
@@ -672,12 +1048,12 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('chat-history-tick', 'data', allow_duplicate=True),
          Output('pending-report', 'data', allow_duplicate=True)],
         Input('pending-user-message', 'data'),
-        State('chat-messages', 'children'),
-        State('chat-language', 'data'),
-        State('chat-session-id', 'data'),
-        State('chat-user-id', 'data'),
-        State('chat-history-tick', 'data'),
-        prevent_initial_call=True
+        [State('chat-messages', 'children'),
+         State('chat-language', 'data'),
+         State('chat-session-id', 'data'),
+         State('chat-user-id', 'data'),
+         State('chat-history-tick', 'data')],
+        prevent_initial_call=True,
     )
     def generate_ai_response(pending, messages, language, session_id, user_id, tick):
         if not pending or not pending.get('text'):
@@ -702,9 +1078,14 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         messages = [m for m in (messages or []) if not _is_typing_indicator(m)]
 
         pending_report_update = dash.no_update
+        assistant_timestamp = datetime.utcnow().isoformat()
         if isinstance(ai_response, dict) and ai_response.get('kind') == 'report':
             messages.append(
-                _report_bubble(ai_response.get('message', ''), language or 'en')
+                _report_bubble(
+                    ai_response.get('message', ''),
+                    language or 'en',
+                    timestamp=assistant_timestamp,
+                )
             )
             pending_report_update = {
                 'token': ai_response.get('report_token'),
@@ -716,7 +1097,13 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 if isinstance(ai_response, dict)
                 else str(ai_response)
             )
-            messages.append(_ai_bubble(text or ''))
+            messages.append(
+                _ai_bubble(
+                    text or '',
+                    timestamp=assistant_timestamp,
+                    language=language or 'en',
+                )
+            )
 
         return messages, (tick or 0) + 1, pending_report_update
 
@@ -774,13 +1161,42 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         [Output('chat-header-label', 'children'),
          Output('download-pdf-btn', 'children'),
          Output('chat-btn', 'children'),
-         Output('chat-sessions-btn', 'children')],
-        Input('chat-language', 'data'),
+         Output('chat-sessions-btn', 'children'),
+         Output('chat-new-session-btn', 'children'),
+         Output('chat-panel-title', 'children'),
+         Output('chat-session-search', 'placeholder'),
+         Output('chat-session-rename-input', 'placeholder'),
+         Output('chat-remember-language-label', 'children'),
+         Output('chat-input', 'placeholder')],
+        [Input('chat-language', 'data'),
+         Input('chat-sessions-open', 'data')],
     )
-    def translate_chat_header(language):
+    def translate_chat_header(language, sessions_open):
         if language == 'es':
-            return 'Asistente de IA', 'Descargar PDF', 'Asistente de IA', 'Chats'
-        return 'AI Assistant', 'Download PDF', 'AI Assistant', 'Chats'
+            return (
+                'Asistente de IA',
+                'Descargar PDF',
+                'Asistente de IA',
+                'Ocultar chats' if sessions_open else 'Chats',
+                'Nuevo chat',
+                'Tus chats',
+                'Buscar conversaciones...',
+                'Renombrar conversación...',
+                'Recordarme en este navegador',
+                'Escribe tu pregunta...',
+            )
+        return (
+            'AI Assistant',
+            'Download PDF',
+            'AI Assistant',
+            'Hide Chats' if sessions_open else 'Chats',
+            'New Chat',
+            'Your chats',
+            'Search conversations...',
+            'Rename conversation...',
+            'Remember me on this browser',
+            'Ask something...',
+        )
 
     def _series_for_category(fips, category, indicator):
         """Return sorted DataFrame[year, val] for one (cat, ind). Handles Overall."""

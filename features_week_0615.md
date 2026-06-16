@@ -2,6 +2,35 @@
 
 Last updated: 2026-06-15
 
+## Snapshot
+
+- AI Chat History and Sessions
+  - SQLite Storage: Persistent chat history in `chat/chat.db`.
+  - Session Continuity: User and session state survive refreshes and restarts.
+  - Saved Browsing: Reopen and continue earlier chat sessions.
+  - Device Naming: Remember the user's name on the same device.
+  - PDF Export: Export saved chat transcripts as PDF.
+- Chat Window Controls
+  - Left Actions: Chat header actions moved to the left side.
+  - Maximize Toggle: Added maximize and restore controls.
+  - Fullscreen Layout: Chat expands below the app header and top bar.
+  - Resize Support: Resize handle stays in normal mode and hides when maximized.
+- Cross-Session Memory Phase A
+  - Live Context: Send the latest active-session messages to the model.
+  - Lexical Retrieval: Pull relevant same-user history from recent sessions.
+  - Typo Matching: Surface close matches like `eliv` to `elev`.
+  - Memory Rerank: Prefer resolved definition-style answers over noisy repeats.
+  - Context Cleanup: Drop stale negative memory when better resolved memory exists.
+- Chat Sessions and UX
+  - Language Memory: Remember the selected chat language in the same browser.
+  - New Session: Start a fresh chat without overwriting saved sessions.
+  - Session Titles: Auto-title, rename, and delete saved conversations.
+  - History Search: Search chats by keyword and jump to matched messages.
+  - Message Tools: Show timestamps and add copy actions for assistant replies.
+  - Expanded Panel: Full-height Chats panel with theming and active-session highlighting.
+
+Detailed notes follow below.
+
 ## Completed
 
 ### AI Chat History and Sessions
@@ -36,6 +65,19 @@ Last updated: 2026-06-15
 - Added a structured "Resolved same-user memory for this query" summary block so typo-to-term carryover is explicit before the raw supporting history.
 - Strengthened the LLM memory directive to treat resolved same-user memory as the preferred answer path unless current-session or data context overrides it.
 - Cleaned cross-session context for typo/acronym follow-ups so stale negations like "not a term" do not contaminate the current answer when a prior resolved definition exists.
+
+### Chat Sessions and UX
+
+- Added browser-level language remember-me for the chat sign-on so the selected language can reopen automatically on the same browser.
+- Added a dedicated `New Chat` button that starts a fresh session without overwriting saved conversations.
+- Added automatic session titles from the first user message, plus custom session renaming support.
+- Added conversation deletion support for removing unwanted saved sessions.
+- Added session recency tracking with `updated_at` so saved conversations can sort by latest activity.
+- Added chat history keyword search across saved conversations with direct session open and matched-message jump navigation.
+- Added message timestamps inside chat conversations for both loaded history and new live messages.
+- Added copy-to-clipboard actions for assistant replies.
+- Refreshed the Chats panel into a full-height expandable browser with active-session highlighting, search, rename, and delete controls.
+- Verified the chat session metadata flow with a local SQLite smoke test covering auto-title generation, rename, search, timestamps, and delete.
 
 ## Notes
 

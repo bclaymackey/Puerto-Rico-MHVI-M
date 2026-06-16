@@ -355,12 +355,17 @@ def _chat_widget() -> list:
             ),
             dcc.Store(id='pending-user-message'),
             dcc.Store(id='chat-language', data=None),
+            dcc.Store(id='chat-language-preference', storage_type='local'),
             dcc.Store(id='chat-session-id', data=str(uuid.uuid4()), storage_type='memory'),
             dcc.Store(id='chat-user-id', storage_type='local'),
             dcc.Store(id='chat-history-tick', data=0),
+            dcc.Store(id='chat-sessions-open', data=False),
+            dcc.Store(id='chat-scroll-target'),
+            dcc.Store(id='chat-rename-session-id'),
             dcc.Download(id='download-pdf'),
             dcc.Download(id='download-report'),
             dcc.Store(id='pending-report'),
+            html.Div(id='chat-scroll-anchor', style={'display': 'none'}),
             html.Div(
                 id='language-selection',
                 style={
@@ -396,6 +401,29 @@ def _chat_widget() -> list:
                             'background': 'linear-gradient(135deg, #03123e 0%, #4b0082 100%)',
                             'color': 'white', 'fontSize': '14px', 'fontWeight': '600'
                         }
+                    ),
+                    html.Label(
+                        [
+                            dcc.Checklist(
+                                id='chat-remember-language',
+                                options=[{'label': '', 'value': 'remember'}],
+                                value=[],
+                                inputStyle={'marginRight': '8px'},
+                                labelStyle={'display': 'none'},
+                                style={'margin': '0'},
+                            ),
+                            html.Span(
+                                'Remember me on this browser',
+                                id='chat-remember-language-label',
+                                style={'fontSize': '12px', 'color': '#555'},
+                            ),
+                        ],
+                        style={
+                            'display': 'flex',
+                            'alignItems': 'center',
+                            'gap': '6px',
+                            'marginTop': '14px',
+                        },
                     ),
                 ]
             ),
@@ -457,6 +485,20 @@ def _chat_widget() -> list:
                                                 },
                                             ),
                                             html.Button(
+                                                'New Chat',
+                                                id='chat-new-session-btn',
+                                                n_clicks=0,
+                                                style={
+                                                    'fontSize': '12px',
+                                                    'padding': '4px 8px',
+                                                    'border': '1px solid #4b0082',
+                                                    'borderRadius': '6px',
+                                                    'background': '#4b0082',
+                                                    'color': 'white',
+                                                    'cursor': 'pointer',
+                                                },
+                                            ),
+                                            html.Button(
                                                 'Download PDF',
                                                 id='download-pdf-btn',
                                                 disabled=True,
@@ -494,18 +536,123 @@ def _chat_widget() -> list:
                     ),
                     html.Div(
                         id='chat-sessions-panel',
-                        children=[],
+                        children=[
+                            html.Div(
+                                [
+                                    html.Div(
+                                        'Your chats',
+                                        id='chat-panel-title',
+                                        style={
+                                            'fontWeight': '700',
+                                            'fontSize': '14px',
+                                            'color': '#f6edff',
+                                        },
+                                    ),
+                                    dcc.Input(
+                                        id='chat-session-search',
+                                        type='text',
+                                        placeholder='Search conversations...',
+                                        debounce=False,
+                                        style={
+                                            'width': '100%',
+                                            'padding': '8px 10px',
+                                            'borderRadius': '10px',
+                                            'border': '1px solid rgba(255,255,255,0.25)',
+                                            'backgroundColor': 'rgba(255,255,255,0.92)',
+                                            'fontSize': '12px',
+                                            'boxSizing': 'border-box',
+                                        },
+                                    ),
+                                    html.Div(
+                                        id='chat-session-rename-row',
+                                        style={'display': 'none'},
+                                        children=[
+                                            dcc.Input(
+                                                id='chat-session-rename-input',
+                                                type='text',
+                                                placeholder='Rename conversation...',
+                                                style={
+                                                    'flex': '1',
+                                                    'padding': '8px 10px',
+                                                    'borderRadius': '10px',
+                                                    'border': '1px solid rgba(255,255,255,0.25)',
+                                                    'fontSize': '12px',
+                                                },
+                                            ),
+                                            html.Button(
+                                                'Save',
+                                                id='chat-session-rename-save-btn',
+                                                n_clicks=0,
+                                                style={
+                                                    'fontSize': '12px',
+                                                    'padding': '7px 10px',
+                                                    'borderRadius': '8px',
+                                                    'border': 'none',
+                                                    'background': '#f6edff',
+                                                    'color': '#31104f',
+                                                    'cursor': 'pointer',
+                                                },
+                                            ),
+                                            html.Button(
+                                                'Cancel',
+                                                id='chat-session-rename-cancel-btn',
+                                                n_clicks=0,
+                                                style={
+                                                    'fontSize': '12px',
+                                                    'padding': '7px 10px',
+                                                    'borderRadius': '8px',
+                                                    'border': '1px solid rgba(255,255,255,0.3)',
+                                                    'background': 'transparent',
+                                                    'color': '#f6edff',
+                                                    'cursor': 'pointer',
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                                style={
+                                    'display': 'flex',
+                                    'flexDirection': 'column',
+                                    'gap': '10px',
+                                    'marginBottom': '10px',
+                                },
+                            ),
+                            html.Div(
+                                id='chat-sessions-list',
+                                style={
+                                    'flex': '1',
+                                    'overflowY': 'auto',
+                                    'paddingRight': '4px',
+                                },
+                            ),
+                        ],
                         style={'display': 'none'},
                     ),
                     html.Div(
-                        id='chat-messages',
-                        children=[],
+                        id='chat-messages-container',
                         style={
-                            'flex': '1', 'overflowY': 'auto',
-                            'border': '1px solid #eee', 'padding': '5px', 'marginBottom': '10px'
-                        }
+                            'display': 'flex',
+                            'flex': '1',
+                            'minHeight': '0',
+                            'marginBottom': '10px',
+                        },
+                        children=[
+                            html.Div(
+                                id='chat-messages',
+                                children=[],
+                                style={
+                                    'flex': '1',
+                                    'overflowY': 'auto',
+                                    'border': '1px solid #eee',
+                                    'padding': '8px',
+                                    'borderRadius': '8px',
+                                    'backgroundColor': '#fcfbff',
+                                },
+                            ),
+                        ],
                     ),
                     html.Div(
+                        id='chat-input-row',
                         style={
                             'display': 'flex', 'alignItems': 'center',
                             'border': '1px solid #ddd', 'borderRadius': '20px',
