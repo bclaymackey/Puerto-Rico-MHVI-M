@@ -1,0 +1,23 @@
+.chat-menu-btn {
+    transition: background-color 0.15s ease;
+}
+
+.chat-menu-btn:hover {
+    background-color: rgba(75, 0, 130, 0.12);
+}
+
+.chat-menu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    transition: background-color 0.15s ease;
+}
+
+.chat-menu-item:hover:not(:disabled) {
+    background-color: #f3eaff;
+}
+
+.chat-menu-item:disabled {
+    color: #c3b3d6;
+    cursor: not-allowed;
+}

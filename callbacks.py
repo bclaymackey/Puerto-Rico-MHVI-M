@@ -147,31 +147,33 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
 
     @app.callback(
         Output('chat-window-state', 'data'),
-        [Input('chat-btn', 'n_clicks'),
-         Input('chat-maximize-btn', 'n_clicks')],
+        Input('chat-btn', 'n_clicks'),
         State('chat-window-state', 'data'),
         prevent_initial_call=True,
     )
-    def update_chat_window_state(open_clicks, maximize_clicks, window_state):
-        state = dict(window_state or {'open': False, 'maximized': False})
-        trigger_id = dash.ctx.triggered_id
-
-        if trigger_id == 'chat-btn' and open_clicks:
-            is_open = not state.get('open', False)
-            return {'open': is_open, 'maximized': False if not is_open else state.get('maximized', False)}
-
-        if trigger_id == 'chat-maximize-btn' and maximize_clicks and state.get('open', False):
-            return {'open': True, 'maximized': not state.get('maximized', False)}
-
+    def update_chat_window_state(open_clicks, window_state):
+        state = dict(window_state or {'open': False})
+        if open_clicks:
+            return {'open': not state.get('open', False)}
         return dash.no_update
 
     app.clientside_callback(
         """
-        function(windowState, language) {
-            var state = windowState || {open: false, maximized: false};
-            var popupStyle = {
+        function(windowState) {
+            var state = windowState || {open: false};
+            return {
                 display: state.open ? 'flex' : 'none',
                 position: 'fixed',
+                top: 'auto',
+                right: 'auto',
+                bottom: '80px',
+                left: '20px',
+                width: '300px',
+                height: '400px',
+                minWidth: '280px',
+                minHeight: '350px',
+                maxWidth: '90vw',
+                maxHeight: '85vh',
                 backgroundColor: 'white',
                 border: '1px solid #ccc',
                 borderRadius: '10px',
@@ -181,62 +183,10 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 flexDirection: 'column',
                 boxSizing: 'border-box'
             };
-            var resizeHandleStyle = {
-                position: 'absolute',
-                top: '4px',
-                right: '6px',
-                width: '28px',
-                height: '28px',
-                cursor: 'nesw-resize',
-                zIndex: '1001',
-                userSelect: 'none',
-                display: state.maximized ? 'none' : 'block'
-            };
-            var buttonIcon = state.maximized ? '❐' : '⛶';
-            var buttonTitle = state.maximized
-                ? (language === 'es' ? 'Volver al tamano normal' : 'Return to default size')
-                : (language === 'es' ? 'Maximizar' : 'Maximize');
-
-            if (state.maximized) {
-                var header = document.getElementById('app-header');
-                var topBar = document.getElementById('app-top-bar');
-                var topOffset = 12;
-
-                if (header) { topOffset += header.getBoundingClientRect().height; }
-                if (topBar) { topOffset += topBar.getBoundingClientRect().height; }
-
-                popupStyle.top = topOffset + 'px';
-                popupStyle.left = '20px';
-                popupStyle.right = '20px';
-                popupStyle.bottom = '20px';
-                popupStyle.width = 'auto';
-                popupStyle.height = 'auto';
-                popupStyle.minWidth = '280px';
-                popupStyle.minHeight = '350px';
-                popupStyle.maxWidth = 'none';
-                popupStyle.maxHeight = 'none';
-            } else {
-                popupStyle.top = 'auto';
-                popupStyle.right = 'auto';
-                popupStyle.bottom = '80px';
-                popupStyle.left = '20px';
-                popupStyle.width = '300px';
-                popupStyle.height = '400px';
-                popupStyle.minWidth = '280px';
-                popupStyle.minHeight = '350px';
-                popupStyle.maxWidth = '90vw';
-                popupStyle.maxHeight = '85vh';
-            }
-
-            return [popupStyle, resizeHandleStyle, buttonIcon, buttonTitle];
         }
         """,
-        [Output('chat-popup', 'style'),
-         Output('chat-resize-handle', 'style'),
-         Output('chat-maximize-btn', 'children'),
-         Output('chat-maximize-btn', 'title')],
-        [Input('chat-window-state', 'data'),
-         Input('chat-language', 'data')],
+        Output('chat-popup', 'style'),
+        Input('chat-window-state', 'data'),
     )
 
     app.clientside_callback(
@@ -282,6 +232,61 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         """,
         Output('chat-resize-handle', 'title'),
         Input('chat-resize-handle', 'id'),
+    )
+
+    @app.callback(
+        Output('chat-menu-open', 'data'),
+        [Input('chat-menu-btn', 'n_clicks'),
+         Input('chat-sessions-btn', 'n_clicks'),
+         Input('chat-new-session-btn', 'n_clicks'),
+         Input('download-pdf-btn', 'n_clicks')],
+        State('chat-menu-open', 'data'),
+        prevent_initial_call=True,
+    )
+    def toggle_chat_menu(menu_clicks, sessions_clicks, new_clicks, pdf_clicks, is_open):
+        if dash.ctx.triggered_id == 'chat-menu-btn':
+            return not bool(is_open)
+        return False
+
+    @app.callback(
+        Output('chat-menu-dropdown', 'style'),
+        Input('chat-menu-open', 'data'),
+    )
+    def sync_chat_menu_style(is_open):
+        return {
+            'display': 'flex' if is_open else 'none',
+            'position': 'absolute',
+            'top': '100%',
+            'right': '0',
+            'marginTop': '4px',
+            'minWidth': '170px',
+            'flexDirection': 'column',
+            'backgroundColor': 'white',
+            'borderRadius': '10px',
+            'boxShadow': '0 12px 24px rgba(22, 7, 39, 0.18)',
+            'overflow': 'hidden',
+            'zIndex': '1003',
+        }
+
+    app.clientside_callback(
+        """
+        function(id) {
+            if (window._chatMenuOutsideClickInit) { return window.dash_clientside.no_update; }
+            window._chatMenuOutsideClickInit = true;
+
+            document.addEventListener('click', function (e) {
+                var btn = document.getElementById('chat-menu-btn');
+                var dropdown = document.getElementById('chat-menu-dropdown');
+                if (!btn || !dropdown || dropdown.style.display === 'none') { return; }
+                if (btn.contains(e.target) || dropdown.contains(e.target)) { return; }
+                window.dash_clientside.set_props('chat-menu-open', {data: false});
+            });
+
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output('chat-menu-btn', 'title'),
+        Input('chat-menu-btn', 'id'),
     )
 
     def _format_message_timestamp(timestamp_value):
@@ -1175,10 +1180,10 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         if language == 'es':
             return (
                 'Asistente de IA',
-                'Descargar PDF',
+                '⬇ Descargar PDF',
                 'Asistente de IA',
-                'Ocultar chats' if sessions_open else 'Chats',
-                'Nuevo chat',
+                '🗂️ ' + ('Ocultar chats' if sessions_open else 'Chats'),
+                '＋ Nuevo chat',
                 'Tus chats',
                 'Buscar conversaciones...',
                 'Renombrar conversación...',
@@ -1187,10 +1192,10 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             )
         return (
             'AI Assistant',
-            'Download PDF',
+            '⬇ Download PDF',
             'AI Assistant',
-            'Hide Chats' if sessions_open else 'Chats',
-            'New Chat',
+            '🗂️ ' + ('Hide Chats' if sessions_open else 'Chats'),
+            '＋ New Chat',
             'Your chats',
             'Search conversations...',
             'Rename conversation...',

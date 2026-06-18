@@ -310,6 +310,19 @@ def _custom_reports_modal(global_categories: list) -> html.Div:
     )
 
 
+_CHAT_MENU_ITEM_STYLE = {
+    'fontSize': '13px',
+    'padding': '10px 14px',
+    'border': 'none',
+    'borderRadius': '0',
+    'background': 'white',
+    'color': '#4b0082',
+    'textAlign': 'left',
+    'cursor': 'pointer',
+    'whiteSpace': 'nowrap',
+}
+
+
 def _chat_widget() -> list:
     """Returns [chat_button, chat_popup] — both are children of the main-content flex row."""
     chat_btn = html.Button(
@@ -339,7 +352,7 @@ def _chat_widget() -> list:
             'boxSizing': 'border-box'
         },
         children=[
-            dcc.Store(id='chat-window-state', data={'open': False, 'maximized': False}),
+            dcc.Store(id='chat-window-state', data={'open': False}),
             html.Div(
                 id='chat-resize-handle',
                 style={
@@ -348,6 +361,7 @@ def _chat_widget() -> list:
                     'right': '6px',
                     'width': '28px',
                     'height': '28px',
+                    'display': 'block',
                     'cursor': 'nesw-resize',
                     'zIndex': '1001',
                     'userSelect': 'none'
@@ -360,6 +374,7 @@ def _chat_widget() -> list:
             dcc.Store(id='chat-user-id', storage_type='local'),
             dcc.Store(id='chat-history-tick', data=0),
             dcc.Store(id='chat-sessions-open', data=False),
+            dcc.Store(id='chat-menu-open', data=False),
             dcc.Store(id='chat-scroll-target'),
             dcc.Store(id='chat-rename-session-id'),
             dcc.Download(id='download-pdf'),
@@ -434,102 +449,89 @@ def _chat_widget() -> list:
                     'flexDirection': 'column', 'minHeight': '0'
                 },
                 children=[
-                    html.Button(
-                        '⛶',
-                        id='chat-maximize-btn',
-                        n_clicks=0,
-                        title='Maximize',
-                        style={
-                            'position': 'absolute',
-                            'top': '6px',
-                            'right': '40px',
-                            'width': '28px',
-                            'height': '28px',
-                            'padding': '0',
-                            'border': '1px solid #4b0082',
-                            'borderRadius': '6px',
-                            'background': 'white',
-                            'color': '#4b0082',
-                            'cursor': 'pointer',
-                            'zIndex': '1002',
-                            'fontSize': '15px',
-                            'lineHeight': '1',
-                        },
-                    ),
                     html.Div(
                         [
+                            html.Span(
+                                'AI Assistant',
+                                id='chat-header-label',
+                                style={
+                                    'fontWeight': 'bold', 'color': '#4b0082',
+                                    'fontSize': '14px'
+                                },
+                            ),
                             html.Div(
                                 [
-                                    html.Span(
-                                        'AI Assistant',
-                                        id='chat-header-label',
+                                    html.Button(
+                                        '⋮',
+                                        id='chat-menu-btn',
+                                        className='chat-menu-btn',
+                                        n_clicks=0,
+                                        title='Chat options',
                                         style={
-                                            'fontWeight': 'bold', 'color': '#4b0082',
-                                            'fontSize': '14px'
+                                            'width': '28px',
+                                            'height': '28px',
+                                            'padding': '0',
+                                            'border': 'none',
+                                            'borderRadius': '50%',
+                                            'background': 'transparent',
+                                            'color': '#4b0082',
+                                            'fontSize': '20px',
+                                            'fontWeight': '700',
+                                            'lineHeight': '1',
+                                            'cursor': 'pointer',
                                         },
                                     ),
                                     html.Div(
-                                        [
+                                        id='chat-menu-dropdown',
+                                        style={
+                                            'display': 'none',
+                                            'position': 'absolute',
+                                            'top': '100%',
+                                            'right': '0',
+                                            'marginTop': '4px',
+                                            'minWidth': '170px',
+                                            'flexDirection': 'column',
+                                            'backgroundColor': 'white',
+                                            'borderRadius': '10px',
+                                            'boxShadow': '0 12px 24px rgba(22, 7, 39, 0.18)',
+                                            'overflow': 'hidden',
+                                            'zIndex': '1003',
+                                        },
+                                        children=[
                                             html.Button(
-                                                'Chats',
+                                                ['🗂️ Chats'],
                                                 id='chat-sessions-btn',
+                                                className='chat-menu-item',
                                                 n_clicks=0,
-                                                style={
-                                                    'fontSize': '12px',
-                                                    'padding': '4px 8px',
-                                                    'border': '1px solid #4b0082',
-                                                    'borderRadius': '6px',
-                                                    'background': 'white',
-                                                    'color': '#4b0082',
-                                                    'cursor': 'pointer',
-                                                },
+                                                style=_CHAT_MENU_ITEM_STYLE,
                                             ),
                                             html.Button(
-                                                'New Chat',
+                                                ['＋ New Chat'],
                                                 id='chat-new-session-btn',
+                                                className='chat-menu-item',
                                                 n_clicks=0,
-                                                style={
-                                                    'fontSize': '12px',
-                                                    'padding': '4px 8px',
-                                                    'border': '1px solid #4b0082',
-                                                    'borderRadius': '6px',
-                                                    'background': '#4b0082',
-                                                    'color': 'white',
-                                                    'cursor': 'pointer',
-                                                },
+                                                style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},
                                             ),
                                             html.Button(
-                                                'Download PDF',
+                                                ['⬇ Download PDF'],
                                                 id='download-pdf-btn',
+                                                className='chat-menu-item',
                                                 disabled=True,
                                                 n_clicks=0,
-                                                style={
-                                                    'fontSize': '12px',
-                                                    'padding': '4px 8px',
-                                                    'border': '1px solid #4b0082',
-                                                    'borderRadius': '6px',
-                                                    'background': 'white',
-                                                    'color': '#4b0082',
-                                                    'cursor': 'pointer',
-                                                },
+                                                style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},
                                             ),
                                         ],
-                                        style={'display': 'flex', 'gap': '5px', 'flexWrap': 'wrap'},
                                     ),
                                 ],
-                                style={
-                                    'display': 'flex',
-                                    'flexDirection': 'column',
-                                    'alignItems': 'flex-start',
-                                    'gap': '6px',
-                                },
+                                style={'position': 'relative'},
                             ),
                         ],
                         style={
                             'display': 'flex',
                             'alignItems': 'center',
+                            'justifyContent': 'space-between',
                             'padding': '6px 4px',
-                            'paddingRight': '74px',
+                            'paddingRight': '34px',
                             'borderBottom': '1px solid #eee',
                             'marginBottom': '6px',
                         },
