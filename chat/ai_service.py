@@ -6,18 +6,16 @@ import pandas as pd
 
 from data import get_db_connection
 
-from .chat_db import ensure_session, ensure_user, get_user_name
-from .chat_history_manager import (
-    build_cross_session_memory_context,
-    build_llm_context,
-    save_ai_response,
-)
-from .data_context_builder import find_all_municipalities, get_data_context
+from .chat_db import ensure_session, ensure_user
+from .chat_history_manager import build_llm_context, save_ai_response
+from .data_context_builder import find_all_municipalities
 from .llm_caller import call_llm
 from .navigation_guide import build_navigation_response, is_navigation_intent
+from .prompt_context import build_prompt_context
 from .report_data_builder import get_report_data
 from .report_generator import generate_report_text
 from .report_pdf import build_report_pdf
+from .session_summary import maybe_update_summary
 
 
 _REPORT_KEYWORDS_EN = [
@@ -102,7 +100,7 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
     found = find_all_municipalities(user_input.lower(), muni_df)
     if not found:
         msg = _need_municipality_message(language)
-        save_ai_response(session_id, msg)
+        save_ai_response(session_id, msg, language)
         return {"kind": "text", "text": msg}
 
     # v1: single municipality only — take the first mention if multiple.
@@ -110,7 +108,7 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
     report_data = get_report_data(municipality)
     if not report_data or not report_data.get("categories"):
         msg = _no_data_message(municipality, language)
-        save_ai_response(session_id, msg)
+        save_ai_response(session_id, msg, language)
         return {"kind": "text", "text": msg}
 
     try:
@@ -119,7 +117,7 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
     except Exception as e:
         print(f"[_generate_report_response] error: {e}")
         msg = _no_data_message(municipality, language)
-        save_ai_response(session_id, msg)
+        save_ai_response(session_id, msg, language)
         return {"kind": "text", "text": msg}
 
     token = uuid.uuid4().hex
@@ -128,7 +126,7 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
     _REPORT_CACHE[token] = (pdf_bytes, filename)
 
     ack = _ack_message(municipality, language)
-    save_ai_response(session_id, ack)
+    save_ai_response(session_id, ack, language)
     return {
         "kind": "report",
         "message": ack,
@@ -163,28 +161,24 @@ def process_chat_message(
 
     if _is_report_intent(text_lower, language):
         # Record the user message in history so the report flow shows up there.
-        build_llm_context(session_id, user_input)
+        build_llm_context(session_id, user_input, language=language)
         return _generate_report_response(user_input, language, session_id)
 
     if is_navigation_intent(text_lower, language):
-        build_llm_context(session_id, user_input)
+        build_llm_context(session_id, user_input, language=language)
         steps = build_navigation_response(user_input, language)
-        save_ai_response(session_id, steps)
+        save_ai_response(session_id, steps, language)
         return {"kind": "text", "text": steps}
 
-    chat_context = build_llm_context(session_id, user_input)
-    cross_session_memory = build_cross_session_memory_context(
-        session_id,
-        user_id,
-        user_input,
-    )
-    data_context = get_data_context(user_input, language)
+    ctx = build_prompt_context(session_id, user_id, user_input, language)
     ai_response = call_llm(
-        chat_context,
-        data_context,
+        ctx["history"],
+        ctx["data_context"],
         language,
-        user_name=get_user_name(user_id),
-        memory_context=cross_session_memory,
+        user_name=ctx["user_name"],
+        memory_context=ctx["memory_context"],
+        summary_context=ctx["summary_context"],
     )
-    save_ai_response(session_id, ai_response)
+    save_ai_response(session_id, ai_response, language)
+    maybe_update_summary(session_id)
     return {"kind": "text", "text": ai_response}

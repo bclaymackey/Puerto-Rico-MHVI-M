@@ -322,6 +322,21 @@ _CHAT_MENU_ITEM_STYLE = {
     'whiteSpace': 'nowrap',
 }
 
+_CHAT_WINDOW_DEFAULT_WIDTH = 300
+_CHAT_WINDOW_DEFAULT_HEIGHT = 400
+
+_CHAT_RESIZE_HANDLE_STYLE = {
+    'position': 'absolute',
+    'top': '4px',
+    'right': '6px',
+    'width': '28px',
+    'height': '28px',
+    'display': 'block',
+    'cursor': 'nesw-resize',
+    'zIndex': '1001',
+    'userSelect': 'none',
+}
+
 
 def _chat_widget() -> list:
     """Returns [chat_button, chat_popup] — both are children of the main-content flex row."""
@@ -342,7 +357,8 @@ def _chat_widget() -> list:
             'display': 'none',
             'position': 'fixed',
             'bottom': '80px', 'left': '20px',
-            'width': '300px', 'height': '400px',
+            'width': f'{_CHAT_WINDOW_DEFAULT_WIDTH}px',
+            'height': f'{_CHAT_WINDOW_DEFAULT_HEIGHT}px',
             'minWidth': '280px', 'minHeight': '350px',
             'maxWidth': '90vw', 'maxHeight': '85vh',
             'backgroundColor': 'white', 'border': '1px solid #ccc',
@@ -352,24 +368,20 @@ def _chat_widget() -> list:
             'boxSizing': 'border-box'
         },
         children=[
-            dcc.Store(id='chat-window-state', data={'open': False}),
+            dcc.Store(id='chat-window-state', data={'open': False, 'fit': False}),
+            dcc.Store(
+                id='chat-window-size',
+                data={'width': _CHAT_WINDOW_DEFAULT_WIDTH, 'height': _CHAT_WINDOW_DEFAULT_HEIGHT},
+            ),
             html.Div(
                 id='chat-resize-handle',
-                style={
-                    'position': 'absolute',
-                    'top': '4px',
-                    'right': '6px',
-                    'width': '28px',
-                    'height': '28px',
-                    'display': 'block',
-                    'cursor': 'nesw-resize',
-                    'zIndex': '1001',
-                    'userSelect': 'none'
-                }
+                style=_CHAT_RESIZE_HANDLE_STYLE,
             ),
             dcc.Store(id='pending-user-message'),
             dcc.Store(id='chat-language', data=None),
             dcc.Store(id='chat-language-preference', storage_type='local'),
+            dcc.Store(id='pending-language-switch'),
+            dcc.Store(id='pending-delete-confirm', data=False),
             dcc.Store(id='chat-session-id', data=str(uuid.uuid4()), storage_type='memory'),
             dcc.Store(id='chat-user-id', storage_type='local'),
             dcc.Store(id='chat-history-tick', data=0),
@@ -499,15 +511,29 @@ def _chat_widget() -> list:
                                         },
                                         children=[
                                             html.Button(
-                                                ['🗂️ Chats'],
-                                                id='chat-sessions-btn',
+                                                ['🌐 Español'],
+                                                id='chat-language-toggle-btn',
                                                 className='chat-menu-item',
                                                 n_clicks=0,
                                                 style=_CHAT_MENU_ITEM_STYLE,
                                             ),
                                             html.Button(
+                                                ['🗂️ Chats'],
+                                                id='chat-sessions-btn',
+                                                className='chat-menu-item',
+                                                n_clicks=0,
+                                                style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},
+                                            ),
+                                            html.Button(
                                                 ['＋ New Chat'],
                                                 id='chat-new-session-btn',
+                                                className='chat-menu-item',
+                                                n_clicks=0,
+                                                style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},
+                                            ),
+                                            html.Button(
+                                                ['⛶ Fit Window'],
+                                                id='chat-fit-window-btn',
                                                 className='chat-menu-item',
                                                 n_clicks=0,
                                                 style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},

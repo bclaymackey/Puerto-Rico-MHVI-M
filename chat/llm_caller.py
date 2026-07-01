@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from .hyperparameters import LLM_MODEL
 from .prompt import SYSTEM_PROMPT
 
 
@@ -29,10 +30,13 @@ def call_llm(
     language: str = "en",
     user_name: str | None = None,
     memory_context: str = "",
+    summary_context: str = "",
 ) -> str:
     name_directive = (
-        f"The user's preferred name is {user_name}. Address the user by this "
-        "name naturally when appropriate."
+        f"The user's preferred name is {user_name}. Use it very sparingly — at "
+        "most an occasional greeting or a warm moment. Do NOT begin replies with "
+        "their name and do NOT repeat it in every message; like a normal "
+        "assistant, you usually answer without naming them at all."
         if user_name
         else ""
     )
@@ -55,10 +59,19 @@ def call_llm(
         if memory_context
         else ""
     )
+    summary_directive = (
+        "Conversation summary so far (rolling memory of this session; use it to "
+        "stay on the active municipality, category, and comparison context, and "
+        "to avoid re-asking resolved facts):\n"
+        f"{summary_context}"
+        if summary_context
+        else ""
+    )
     instructions = (
         f"{SYSTEM_PROMPT}\n\n"
         f"{_language_directive(language)}\n\n"
         f"{name_directive}\n\n"
+        f"{summary_directive}\n\n"
         f"{memory_directive}\n\n"
         "Data context (use exactly if relevant; may be empty for follow-ups):\n"
         f"{data_context}"
@@ -66,9 +79,11 @@ def call_llm(
 
     try:
         print("[call_llm input]", chat_history_context)
+        print("[call_llm data_context]", data_context or "<empty>")
+        print("[call_llm summary_context]", summary_context or "<empty>")
         print("[call_llm memory_context]", memory_context or "<empty>")
         response = openai_client.responses.create(
-            model="gpt-5-nano",
+            model=LLM_MODEL,
             instructions=instructions,
             input=chat_history_context,
         )

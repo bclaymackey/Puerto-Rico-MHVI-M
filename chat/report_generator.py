@@ -1,5 +1,6 @@
 import json
 
+from .hyperparameters import LLM_MODEL
 from .llm_caller import openai_client
 
 
@@ -134,7 +135,7 @@ def generate_report_text(report_data: dict, language: str = "en") -> str:
 
     try:
         response = openai_client.responses.create(
-            model="gpt-5-nano",
+            model=LLM_MODEL,
             instructions=instructions,
             input=input_text,
         )

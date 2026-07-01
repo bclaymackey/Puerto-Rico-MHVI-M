@@ -5,15 +5,17 @@ from dataclasses import dataclass
 import re
 
 from .chat_db import get_chat_db_connection
-
-
-_RECENT_OTHER_SESSION_WINDOW = 12
-_MAX_LEXICAL_TERMS = 8
-_MAX_EXPANDED_TERMS_PER_BASE = 3
-_MAX_SESSION_PAIRS = 5
-_MAX_DEFINITION_MEMORY_PAIRS = 3
-_MEMORY_TEXT_LIMIT = 280
-_CANDIDATE_LIMIT_MULTIPLIER = 6
+from .hyperparameters import (
+    CANDIDATE_LIMIT_MULTIPLIER as _CANDIDATE_LIMIT_MULTIPLIER,
+    ENTITY_BOOST as _ENTITY_BOOST,
+    MAX_DEFINITION_MEMORY_PAIRS as _MAX_DEFINITION_MEMORY_PAIRS,
+    MAX_EXPANDED_TERMS_PER_BASE as _MAX_EXPANDED_TERMS_PER_BASE,
+    MAX_LEXICAL_TERMS as _MAX_LEXICAL_TERMS,
+    MAX_SESSION_PAIRS as _MAX_SESSION_PAIRS,
+    MEMORY_TEXT_LIMIT as _MEMORY_TEXT_LIMIT,
+    RECENT_OTHER_SESSION_WINDOW as _RECENT_OTHER_SESSION_WINDOW,
+    STALL_PENALTY as _STALL_PENALTY,
+)
 _LEXICAL_STOPWORDS = {
     "a", "about", "again", "an", "and", "are", "at", "can", "como", "con",
     "cual", "de", "del", "do", "does", "el", "en", "es", "explain", "for",
@@ -46,6 +48,26 @@ _NEGATION_PATTERN = re.compile(
     r"uses categories like|"
     r"those acronyms aren[’']?t part of the dashboard indicators"
     r")\b",
+    flags=re.IGNORECASE,
+)
+# "Stall" replies: the assistant promised to fetch/pull data later or said it
+# didn't have a breakdown "in this view". These are non-answers — they must not
+# be remembered as if they resolved anything. (Phase 3b)
+_STALL_PATTERN = re.compile(
+    r"("
+    r"shall i (?:fetch|pull|show|get)|"
+    r"do you want me to (?:fetch|pull|get)|"
+    r"would you like me to (?:fetch|pull|get)|"
+    r"i can pull|"
+    r"i[’']?ll (?:fetch|pull|show|present)|"
+    r"i[’']?m pulling|"
+    r"pulling .* (?:scores|now)|"
+    r"i don[’']?t have the (?:domain|sub-?score|breakdown)|"
+    r"don[’']?t have the .* (?:in this view|yet)|"
+    r"in this view[—,-]|"
+    r"side-?by-?side breakdown (?:shortly|in a moment)|"
+    r"will (?:present|show) .* (?:shortly|in a moment)"
+    r")",
     flags=re.IGNORECASE,
 )
 
@@ -82,6 +104,7 @@ class MemoryPair:
     query_signature: str
     is_definition: bool
     is_negative: bool
+    is_stall: bool
 
 
 @dataclass(frozen=True)
@@ -137,6 +160,7 @@ class LexicalSearchResult:
                 "query_signature": pair.query_signature,
                 "is_definition": pair.is_definition,
                 "is_negative": pair.is_negative,
+                "is_stall": pair.is_stall,
                 "user_preview": truncate_for_memory(pair.user_text, 140),
                 "assistant_preview": truncate_for_memory(pair.assistant_text, 140),
             }
@@ -196,6 +220,11 @@ def _assistant_has_definition(text: str) -> bool:
 
 def _assistant_has_negation(text: str) -> bool:
     return bool(_NEGATION_PATTERN.search(text or ""))
+
+
+def _assistant_is_stall(text: str) -> bool:
+    """True for non-answer 'I'll fetch/pull that later' replies (Phase 3b)."""
+    return bool(_STALL_PATTERN.search(text or ""))
 
 
 def _is_definition_query(text: str) -> bool:
@@ -397,6 +426,7 @@ def _pair_bonus(
     assistant_text: str,
     hit: MessageHit,
     term_specs: list[SearchTermSpec],
+    entity_terms: list[str] | None = None,
 ) -> int:
     bonus = 0
     assistant_normalized = normalize_lexical_text(assistant_text)
@@ -412,6 +442,8 @@ def _pair_bonus(
             bonus += 14
         if _assistant_has_negation(assistant_text):
             bonus -= 10
+        if _assistant_is_stall(assistant_text):
+            bonus -= _STALL_PENALTY  # Phase 3b: bury "I'll fetch later" non-answers.
 
     for spec in term_specs:
         if spec.source == "expanded" and _contains_term(combined_text, spec.term):
@@ -421,6 +453,12 @@ def _pair_bonus(
         if spec.source == "base" and _contains_term(assistant_normalized, spec.term):
             bonus += 4
 
+    # Phase 3b: entity-aware boost — prefer past pairs about the *active*
+    # municipality/category in play this turn, not just any lexical overlap.
+    for term in entity_terms or []:
+        if _contains_term(combined_text, term):
+            bonus += _ENTITY_BOOST
+
     return bonus
 
 
@@ -428,6 +466,7 @@ def _build_memory_pair(
     hit: MessageHit,
     messages_by_session: dict[str, list[dict]],
     term_specs: list[SearchTermSpec],
+    entity_terms: list[str] | None = None,
 ) -> MemoryPair | None:
     messages = messages_by_session.get(hit.session_id, [])
     index_by_id = {message["id"]: idx for idx, message in enumerate(messages)}
@@ -456,11 +495,14 @@ def _build_memory_pair(
     if not user_text and not assistant_text:
         return None
 
-    pair_score = hit.score + _pair_bonus(user_text, assistant_text, hit, term_specs)
+    pair_score = hit.score + _pair_bonus(
+        user_text, assistant_text, hit, term_specs, entity_terms
+    )
     event_at = assistant_message["event_at"] if assistant_message else hit.event_at
     query_signature = normalize_lexical_text(user_text)
     is_definition = _assistant_has_definition(assistant_text)
     is_negative = _assistant_has_negation(assistant_text)
+    is_stall = _assistant_is_stall(assistant_text)
 
     return MemoryPair(
         session_id=hit.session_id,
@@ -476,6 +518,7 @@ def _build_memory_pair(
         query_signature=query_signature,
         is_definition=is_definition,
         is_negative=is_negative,
+        is_stall=is_stall,
     )
 
 
@@ -495,6 +538,10 @@ def _filter_pair_candidates(
     terms: list[str],
     expanded_terms: list[str],
 ) -> list[MemoryPair]:
+    # Phase 3b: never carry forward "I'll fetch that later" non-answers — they
+    # only teach the model to repeat its own stalling.
+    pair_candidates = [pair for pair in pair_candidates if not pair.is_stall]
+
     relevance_terms = [*terms, *expanded_terms]
     definition_query = _is_definition_query(normalized_query)
     resolved_definition_pairs = [
@@ -595,6 +642,7 @@ def search_cross_session_memory(
     user_id: str | None,
     user_message: str,
     max_messages: int,
+    entity_terms: list[str] | None = None,
 ) -> LexicalSearchResult:
     normalized_query = normalize_lexical_text(user_message)
     terms = extract_lexical_terms(user_message)
@@ -683,7 +731,9 @@ def search_cross_session_memory(
         pair_candidates: list[MemoryPair] = []
         seen_pair_keys = set()
         for hit in db_hits:
-            pair = _build_memory_pair(hit, messages_by_session, term_specs)
+            pair = _build_memory_pair(
+                hit, messages_by_session, term_specs, entity_terms
+            )
             if not pair:
                 continue
             pair_key = (pair.session_id, pair.user_message_id, pair.assistant_message_id)

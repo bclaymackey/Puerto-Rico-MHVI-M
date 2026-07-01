@@ -19,16 +19,20 @@ def _normalize_session_title(text: str | None) -> str:
     return normalized[:_SESSION_TITLE_LIMIT].rstrip()
 
 
+def _row_value(row: sqlite3.Row | tuple, key: str, index: int):
+    return row[key] if isinstance(row, sqlite3.Row) else row[index]
+
+
 def _display_session_title(row: sqlite3.Row | tuple | None) -> str:
     if not row:
         return _EMPTY_CHAT_TITLE
-    custom_title = _normalize_session_title(row["custom_title"] if isinstance(row, sqlite3.Row) else row[0])
+    custom_title = _normalize_session_title(_row_value(row, "custom_title", 0))
     if custom_title:
         return custom_title
-    auto_title = _normalize_session_title(row["auto_title"] if isinstance(row, sqlite3.Row) else row[1])
+    auto_title = _normalize_session_title(_row_value(row, "auto_title", 1))
     if auto_title:
         return auto_title
-    first_user_title = _normalize_session_title(row["first_user_title"] if isinstance(row, sqlite3.Row) else row[2])
+    first_user_title = _normalize_session_title(_row_value(row, "first_user_title", 2))
     return first_user_title or _EMPTY_CHAT_TITLE
 
 
@@ -82,6 +86,27 @@ def init_chat_db() -> None:
             conn.execute("ALTER TABLE sessions ADD COLUMN auto_title TEXT")
         if "custom_title" not in session_columns:
             conn.execute("ALTER TABLE sessions ADD COLUMN custom_title TEXT")
+        if "running_summary" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN running_summary TEXT")
+        if "summary_updated_at" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN summary_updated_at TEXT")
+        if "last_summarized_message_id" not in session_columns:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN last_summarized_message_id INTEGER"
+            )
+        # ── Bilingual storage: every message/title/summary in both languages ──
+        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        for column in (
+            "auto_title_en", "auto_title_es",
+            "custom_title_en", "custom_title_es",
+            "running_summary_en", "running_summary_es",
+        ):
+            if column not in session_columns:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
+        message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        for column in ("content_en", "content_es", "source_lang"):
+            if column not in message_columns:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {column} TEXT")
         conn.execute(
             """
             UPDATE sessions
@@ -150,17 +175,71 @@ def get_user_name(user_id: str | None) -> str | None:
         conn.close()
 
 
-def get_session_title(session_id: str) -> str:
+def get_session_summary(session_id: str) -> dict:
+    """Return the rolling summary state for a session.
+
+    {"running_summary": str | None, "last_summarized_message_id": int | None}
+    """
+    conn = get_chat_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT running_summary, last_summarized_message_id "
+            "FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"running_summary": None, "last_summarized_message_id": None}
+    return {"running_summary": row[0], "last_summarized_message_id": row[1]}
+
+
+def update_session_summary(
+    session_id: str,
+    summary: str,
+    last_message_id: int,
+    source_lang: str = "en",
+) -> None:
+    # Import here to avoid a circular import at module load (translator imports
+    # llm_caller, which is otherwise independent of chat_db).
+    from .translator import make_bilingual
+
+    summary_en, summary_es = make_bilingual(summary, source_lang)
+    conn = get_chat_db_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET running_summary = ?,
+                running_summary_en = ?,
+                running_summary_es = ?,
+                summary_updated_at = ?,
+                last_summarized_message_id = ?
+            WHERE id = ?
+            """,
+            (
+                summary, summary_en, summary_es,
+                datetime.utcnow().isoformat(), last_message_id, session_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_session_title(session_id: str, language: str = "en") -> str:
+    suffix = "es" if language == "es" else "en"
+    content_col = f"content_{suffix}"
     conn = get_chat_db_connection()
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT
-                s.custom_title,
-                s.auto_title,
+                COALESCE(s.custom_title_{suffix}, s.custom_title) AS custom_title,
+                COALESCE(s.auto_title_{suffix}, s.auto_title) AS auto_title,
                 (
-                    SELECT content
+                    SELECT COALESCE(NULLIF({content_col}, ''), content)
                     FROM messages
                     WHERE session_id = s.id AND role = 'user'
                     ORDER BY id
@@ -176,16 +255,46 @@ def get_session_title(session_id: str) -> str:
         conn.close()
 
 
-def rename_session(session_id: str, title: str | None) -> None:
+def rename_session(session_id: str, title: str | None, language: str = "en") -> None:
     if not session_id:
         return
+    from .translator import make_bilingual
+
     normalized = _normalize_session_title(title)
+    source_lang = "es" if language == "es" else "en"
+    if normalized:
+        title_en, title_es = make_bilingual(normalized, source_lang)
+        title_en = _normalize_session_title(title_en) or None
+        title_es = _normalize_session_title(title_es) or None
+    else:
+        title_en = title_es = None
     conn = get_chat_db_connection()
     try:
         conn.execute(
-            "UPDATE sessions SET custom_title = ? WHERE id = ?",
-            (normalized or None, session_id),
+            """
+            UPDATE sessions
+            SET custom_title = ?, custom_title_en = ?, custom_title_es = ?
+            WHERE id = ?
+            """,
+            (normalized or None, title_en, title_es, session_id),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_all_user_data(user_id: str | None) -> None:
+    """Delete every session, message, and summary for this user (used by /delete)."""
+    if not user_id:
+        return
+    conn = get_chat_db_connection()
+    try:
+        conn.execute(
+            "DELETE FROM messages WHERE session_id IN "
+            "(SELECT id FROM sessions WHERE user_id = ?)",
+            (user_id,),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
     finally:
         conn.close()
@@ -210,23 +319,25 @@ def delete_session(session_id: str, user_id: str | None = None) -> None:
         conn.close()
 
 
-def list_user_sessions(user_id: str | None) -> list[dict]:
+def list_user_sessions(user_id: str | None, language: str = "en") -> list[dict]:
     if not user_id:
         return []
+    suffix = "es" if language == "es" else "en"
+    content_col = f"content_{suffix}"
     conn = get_chat_db_connection()
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 s.id,
                 s.created_at,
                 COALESCE(s.updated_at, s.created_at) AS updated_at,
-                s.auto_title,
-                s.custom_title,
+                COALESCE(s.auto_title_{suffix}, s.auto_title) AS auto_title,
+                COALESCE(s.custom_title_{suffix}, s.custom_title) AS custom_title,
                 COUNT(m.id) AS message_count,
                 (
-                    SELECT content
+                    SELECT COALESCE(NULLIF({content_col}, ''), content)
                     FROM messages
                     WHERE session_id = s.id AND role = 'user'
                     ORDER BY id
@@ -255,32 +366,35 @@ def search_user_conversations(
     user_id: str | None,
     query: str,
     limit: int = 50,
+    language: str = "en",
 ) -> list[dict]:
     normalized_query = _normalize_session_title(query).lower()
     if not user_id:
         return []
     if not normalized_query:
-        return list_user_sessions(user_id)[:limit]
+        return list_user_sessions(user_id, language)[:limit]
 
-    sessions = list_user_sessions(user_id)
+    sessions = list_user_sessions(user_id, language)
     if not sessions:
         return []
 
+    suffix = "es" if language == "es" else "en"
+    content_col = f"content_{suffix}"
     conn = get_chat_db_connection()
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 m.session_id,
                 m.id AS message_id,
                 m.role,
-                m.content,
+                COALESCE(NULLIF(m.{content_col}, ''), m.content) AS content,
                 m.timestamp
             FROM messages AS m
             JOIN sessions AS s ON s.id = m.session_id
             WHERE s.user_id = ?
-              AND LOWER(COALESCE(m.content, '')) LIKE ?
+              AND LOWER(COALESCE(NULLIF(m.{content_col}, ''), m.content, '')) LIKE ?
             ORDER BY COALESCE(m.timestamp, s.created_at) DESC, m.id DESC
             """,
             (user_id, f"%{normalized_query}%"),

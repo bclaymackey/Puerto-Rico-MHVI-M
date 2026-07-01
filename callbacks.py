@@ -10,6 +10,7 @@ import numpy as np
 from chat import (
     build_pdf_bytes,
     consume_report,
+    delete_all_user_data,
     delete_session,
     get_history_for_display,
     get_session_title,
@@ -147,33 +148,42 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
 
     @app.callback(
         Output('chat-window-state', 'data'),
-        Input('chat-btn', 'n_clicks'),
+        [Input('chat-btn', 'n_clicks'),
+         Input('chat-fit-window-btn', 'n_clicks')],
         State('chat-window-state', 'data'),
         prevent_initial_call=True,
     )
-    def update_chat_window_state(open_clicks, window_state):
-        state = dict(window_state or {'open': False})
-        if open_clicks:
-            return {'open': not state.get('open', False)}
+    def update_chat_window_state(open_clicks, fit_clicks, window_state):
+        state = {'open': False, 'fit': False, **(window_state or {})}
+        trigger_id = dash.ctx.triggered_id
+        if trigger_id == 'chat-btn' and open_clicks:
+            state['open'] = not bool(state.get('open', False))
+            return state
+        if trigger_id == 'chat-fit-window-btn' and fit_clicks:
+            state['fit'] = not bool(state.get('fit', False))
+            return state
         return dash.no_update
 
     app.clientside_callback(
         """
-        function(windowState) {
-            var state = windowState || {open: false};
+        function(windowState, windowSize) {
+            var state = windowState || {open: false, fit: false};
+            var size = windowSize || {width: 300, height: 400};
+            var width = Math.min(window.innerWidth * 0.9, Math.max(280, Number(size.width) || 300));
+            var height = Math.min(window.innerHeight * 0.85, Math.max(350, Number(size.height) || 400));
             return {
                 display: state.open ? 'flex' : 'none',
                 position: 'fixed',
-                top: 'auto',
-                right: 'auto',
-                bottom: '80px',
-                left: '20px',
-                width: '300px',
-                height: '400px',
+                top: state.fit ? '20px' : 'auto',
+                right: state.fit ? '20px' : 'auto',
+                bottom: state.fit ? '20px' : '80px',
+                left: state.fit ? '20px' : '20px',
+                width: state.fit ? 'auto' : width + 'px',
+                height: state.fit ? 'auto' : height + 'px',
                 minWidth: '280px',
                 minHeight: '350px',
-                maxWidth: '90vw',
-                maxHeight: '85vh',
+                maxWidth: state.fit ? 'none' : '90vw',
+                maxHeight: state.fit ? 'none' : '85vh',
                 backgroundColor: 'white',
                 border: '1px solid #ccc',
                 borderRadius: '10px',
@@ -186,8 +196,29 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         }
         """,
         Output('chat-popup', 'style'),
+        [Input('chat-window-state', 'data'),
+         Input('chat-window-size', 'data')],
+    )
+
+    @app.callback(
+        Output('chat-resize-handle', 'style'),
         Input('chat-window-state', 'data'),
     )
+    def sync_chat_resize_handle(window_state):
+        style = {
+            'position': 'absolute',
+            'top': '4px',
+            'right': '6px',
+            'width': '28px',
+            'height': '28px',
+            'display': 'block',
+            'cursor': 'nesw-resize',
+            'zIndex': '1001',
+            'userSelect': 'none',
+        }
+        if (window_state or {}).get('fit'):
+            style['display'] = 'none'
+        return style
 
     app.clientside_callback(
         """
@@ -202,6 +233,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             var startX, startY, startW, startH;
 
             handle.addEventListener('mousedown', function (e) {
+                if (handle.style.display === 'none') { return; }
                 dragging = true;
                 startX = e.clientX;
                 startY = e.clientY;
@@ -225,7 +257,14 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 popup.style.height = newH + 'px';
             });
 
-            document.addEventListener('mouseup', function () { dragging = false; });
+            document.addEventListener('mouseup', function () {
+                if (!dragging) { return; }
+                dragging = false;
+                var rect = popup.getBoundingClientRect();
+                window.dash_clientside.set_props('chat-window-size', {
+                    data: {width: Math.round(rect.width), height: Math.round(rect.height)}
+                });
+            });
 
             return window.dash_clientside.no_update;
         }
@@ -237,13 +276,15 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
     @app.callback(
         Output('chat-menu-open', 'data'),
         [Input('chat-menu-btn', 'n_clicks'),
+         Input('chat-language-toggle-btn', 'n_clicks'),
          Input('chat-sessions-btn', 'n_clicks'),
          Input('chat-new-session-btn', 'n_clicks'),
+         Input('chat-fit-window-btn', 'n_clicks'),
          Input('download-pdf-btn', 'n_clicks')],
         State('chat-menu-open', 'data'),
         prevent_initial_call=True,
     )
-    def toggle_chat_menu(menu_clicks, sessions_clicks, new_clicks, pdf_clicks, is_open):
+    def toggle_chat_menu(menu_clicks, lang_clicks, sessions_clicks, new_clicks, fit_clicks, pdf_clicks, is_open):
         if dash.ctx.triggered_id == 'chat-menu-btn':
             return not bool(is_open)
         return False
@@ -766,9 +807,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             return dash.no_update
         language = language or 'en'
         sessions = (
-            search_user_conversations(user_id, search_value or '')
+            search_user_conversations(user_id, search_value or '', language=language)
             if (search_value or '').strip()
-            else list_user_sessions(user_id)
+            else list_user_sessions(user_id, language)
         )
         return _render_session_rows(sessions, active_session_id, language, search_value or '')
 
@@ -776,8 +817,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         [Output('chat-session-rename-row', 'style'),
          Output('chat-session-rename-input', 'value')],
         Input('chat-rename-session-id', 'data'),
+        State('chat-language', 'data'),
     )
-    def sync_rename_row(session_id):
+    def sync_rename_row(session_id, language):
         if not session_id:
             return {'display': 'none'}, ''
         return (
@@ -786,7 +828,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 'alignItems': 'center',
                 'gap': '8px',
             },
-            get_session_title(session_id),
+            get_session_title(session_id, language or 'en'),
         )
 
     @app.callback(
@@ -808,15 +850,16 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Input('chat-session-rename-cancel-btn', 'n_clicks')],
         [State('chat-rename-session-id', 'data'),
          State('chat-session-rename-input', 'value'),
+         State('chat-language', 'data'),
          State('chat-history-tick', 'data')],
         prevent_initial_call=True,
     )
-    def handle_session_rename(save_clicks, cancel_clicks, session_id, title, tick):
+    def handle_session_rename(save_clicks, cancel_clicks, session_id, title, language, tick):
         trigger_id = dash.ctx.triggered_id
         if trigger_id == 'chat-session-rename-cancel-btn':
             return None, dash.no_update
         if trigger_id == 'chat-session-rename-save-btn' and save_clicks and session_id:
-            rename_session(session_id, title)
+            rename_session(session_id, title, language or 'en')
             return None, (tick or 0) + 1
         return dash.no_update, dash.no_update
 
@@ -839,7 +882,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
 
         session_id = triggered.get('session_id')
         target_message_id = triggered.get('message_id') or None
-        history = get_history_for_display(session_id)
+        history = get_history_for_display(session_id, language or 'en')
         return (
             session_id,
             _render_history_messages(history, language or 'en', target_message_id),
@@ -945,6 +988,59 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         )
 
     @app.callback(
+        [Output('chat-language', 'data', allow_duplicate=True),
+         Output('chat-language-preference', 'data', allow_duplicate=True)],
+        [Input('chat-language-toggle-btn', 'n_clicks'),
+         Input('pending-language-switch', 'data')],
+        [State('chat-language', 'data'),
+         State('chat-language-preference', 'data')],
+        prevent_initial_call=True,
+    )
+    def switch_language(toggle_clicks, pending_switch, current_language, preference):
+        trigger_id = dash.ctx.triggered_id
+        current_language = current_language or 'en'
+
+        if trigger_id == 'chat-language-toggle-btn':
+            if not toggle_clicks:
+                return dash.no_update, dash.no_update
+            new_language = 'en' if current_language == 'es' else 'es'
+        elif trigger_id == 'pending-language-switch':
+            # Slash command (/spanish, /english). Payload is the target language.
+            if not pending_switch:
+                return dash.no_update, dash.no_update
+            new_language = 'es' if pending_switch == 'es' else 'en'
+            if new_language == current_language:
+                return dash.no_update, dash.no_update
+        else:
+            return dash.no_update, dash.no_update
+
+        # Persist the new choice only if the user opted to be remembered.
+        preference_update = dash.no_update
+        if preference and preference.get('language'):
+            preference_update = {'language': new_language}
+        return new_language, preference_update
+
+    @app.callback(
+        Output('chat-messages', 'children', allow_duplicate=True),
+        Input('chat-language', 'data'),
+        [State('chat-session-id', 'data'),
+         State('chat-messages', 'children')],
+        prevent_initial_call=True,
+    )
+    def retranslate_visible_conversation(language, session_id, messages):
+        # Re-render the whole visible thread in the newly selected language so
+        # nothing stays in the old language. Reuses the same DB-backed load path
+        # as load_chat_session; falls back to a welcome bubble for empty threads.
+        if not language or not session_id:
+            return dash.no_update
+        history = get_history_for_display(session_id, language)
+        if not history:
+            # No persisted turns yet (e.g. right after the entry choice). Leave
+            # the current bubbles as-is rather than wiping them.
+            return dash.no_update
+        return _render_history_messages(history, language)
+
+    @app.callback(
         [Output('chat-session-id', 'data', allow_duplicate=True),
          Output('chat-messages', 'children', allow_duplicate=True),
          Output('chat-sessions-open', 'data', allow_duplicate=True),
@@ -971,7 +1067,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('chat-input', 'value'),
          Output('pending-user-message', 'data'),
          Output('chat-session-id', 'data'),
-         Output('chat-history-tick', 'data', allow_duplicate=True)],
+         Output('chat-history-tick', 'data', allow_duplicate=True),
+         Output('pending-language-switch', 'data'),
+         Output('pending-delete-confirm', 'data')],
         [Input('chat-send-btn', 'n_clicks'),
          Input('chat-input', 'n_submit')],
         [State('chat-input', 'value'),
@@ -979,34 +1077,120 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          State('chat-language', 'data'),
          State('chat-session-id', 'data'),
          State('chat-user-id', 'data'),
-         State('chat-history-tick', 'data')],
+         State('chat-history-tick', 'data'),
+         State('pending-delete-confirm', 'data')],
         prevent_initial_call=True,
     )
     def show_user_message(
         n_clicks, n_submit, user_input, messages, language, session_id, user_id,
-        history_tick
+        history_tick, delete_pending
     ):
         if not (n_clicks or n_submit) or not user_input or not user_input.strip():
-            return (dash.no_update,) * 5
+            return (dash.no_update,) * 7
 
+        language = language or 'en'
         command = user_input.strip().lower()
+
+        # Any command other than a fresh /delete clears a pending confirmation,
+        # so a stale "yes" can never delete after an unrelated message.
+        clear_confirm = False if delete_pending else dash.no_update
+
+        def _bubble_reply(message):
+            """Append an assistant bubble, clear input, no other side effects."""
+            return (
+                [
+                    *(messages or []),
+                    _ai_bubble(
+                        message,
+                        timestamp=datetime.utcnow().isoformat(),
+                        language=language,
+                    ),
+                ],
+                '',
+                None,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                clear_confirm,
+            )
+
         if command in {'/new', '/session'}:
             return (
-                [_welcome_bubble(language or 'en')],
+                [_welcome_bubble(language)],
                 '',
                 None,
                 str(uuid.uuid4()),
                 (history_tick or 0) + 1,
+                dash.no_update,
+                clear_confirm,
             )
+
+        # ── Language switch commands ────────────────────────────────────────
+        if command in {'/spanish', '/español', '/es'}:
+            reply = 'Idioma cambiado a Español.' if language != 'es' else 'Ya estás en Español.'
+            base = _bubble_reply(reply)
+            return (*base[:5], 'es', clear_confirm)
+        if command in {'/english', '/en'}:
+            reply = 'Language switched to English.' if language != 'en' else 'Already in English.'
+            base = _bubble_reply(reply)
+            return (*base[:5], 'en', clear_confirm)
+
+        # ── Delete all history (ask for confirmation first) ─────────────────
+        if command == '/delete':
+            if delete_pending:
+                # Second /delete confirms — wipe everything and start fresh.
+                delete_all_user_data(user_id)
+                reply = (
+                    'Se eliminó todo el historial de chat y los resúmenes.'
+                    if language == 'es'
+                    else 'All chat history and summaries have been deleted.'
+                )
+                return (
+                    [_welcome_bubble(language),
+                     _ai_bubble(reply, timestamp=datetime.utcnow().isoformat(), language=language)],
+                    '',
+                    None,
+                    str(uuid.uuid4()),
+                    (history_tick or 0) + 1,
+                    dash.no_update,
+                    False,
+                )
+            prompt = (
+                '¿Estás seguro de que deseas eliminar todo el historial de chat y '
+                'todos los resúmenes de sesión de todas las sesiones? '
+                'Escribe /delete otra vez para confirmar, o /cancel para cancelar.'
+                if language == 'es'
+                else 'Are you sure you want to delete the entire chat history and all '
+                'session summaries across all sessions? Type /delete again to '
+                'confirm, or /cancel to cancel.'
+            )
+            base = _bubble_reply(prompt)
+            return (*base[:6], True)
+        if command == '/cancel':
+            reply = 'Cancelado.' if language == 'es' else 'Cancelled.'
+            base = _bubble_reply(reply)
+            return (*base[:6], False)
 
         if command == '/name' or command.startswith('/name '):
             name = user_input.strip()[len('/name'):].strip()
             if not name:
-                message = 'Use /name followed by your name, for example: /name Tom'
+                message = (
+                    'Escribe /name seguido de tu nombre, por ejemplo: /name Tom'
+                    if language == 'es'
+                    else 'Use /name followed by your name, for example: /name Tom'
+                )
             elif not user_id:
-                message = 'Your device ID is still loading. Please try /name again.'
+                message = (
+                    'Tu ID de dispositivo aún se está cargando. Intenta /name de nuevo.'
+                    if language == 'es'
+                    else 'Your device ID is still loading. Please try /name again.'
+                )
             elif not all(char.isalpha() or char in " .'-" for char in name):
-                message = 'Names may contain letters, spaces, apostrophes, periods, and hyphens.'
+                message = (
+                    'Los nombres pueden contener letras, espacios, apóstrofes, puntos y guiones.'
+                    if language == 'es'
+                    else 'Names may contain letters, spaces, apostrophes, periods, and hyphens.'
+                )
             else:
                 name = ' '.join(name.split())[:80]
                 set_user_name(user_id, name)
@@ -1015,27 +1199,14 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                     if language != 'es'
                     else f'Entendido, {name}. Recordaré tu nombre en este dispositivo.'
                 )
-            return (
-                [
-                    *(messages or []),
-                    _ai_bubble(
-                        message,
-                        timestamp=datetime.utcnow().isoformat(),
-                        language=language or 'en',
-                    ),
-                ],
-                '',
-                None,
-                dash.no_update,
-                dash.no_update,
-            )
+            return _bubble_reply(message)
 
         messages = list(messages or [])
         messages.append(
             _user_bubble(
                 user_input,
                 timestamp=datetime.utcnow().isoformat(),
-                language=language or 'en',
+                language=language,
             )
         )
         messages.append(_typing_bubble())
@@ -1046,6 +1217,8 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             {'text': user_input, 'n': n_clicks},
             dash.no_update,
             dash.no_update,
+            dash.no_update,
+            clear_confirm,
         )
 
     @app.callback(
@@ -1123,7 +1296,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         if not n_clicks or not session_id:
             return dash.no_update
 
-        history = get_history_for_display(session_id)
+        history = get_history_for_display(session_id, language or 'en')
         if not history:
             return dash.no_update
 
@@ -1164,6 +1337,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
 
     @app.callback(
         [Output('chat-header-label', 'children'),
+         Output('chat-fit-window-btn', 'children'),
          Output('download-pdf-btn', 'children'),
          Output('chat-btn', 'children'),
          Output('chat-sessions-btn', 'children'),
@@ -1172,14 +1346,18 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('chat-session-search', 'placeholder'),
          Output('chat-session-rename-input', 'placeholder'),
          Output('chat-remember-language-label', 'children'),
-         Output('chat-input', 'placeholder')],
+         Output('chat-input', 'placeholder'),
+         Output('chat-language-toggle-btn', 'children')],
         [Input('chat-language', 'data'),
-         Input('chat-sessions-open', 'data')],
+         Input('chat-sessions-open', 'data'),
+         Input('chat-window-state', 'data')],
     )
-    def translate_chat_header(language, sessions_open):
+    def translate_chat_header(language, sessions_open, window_state):
+        fit_label = '🗕 Minimizar' if (window_state or {}).get('fit') else '⛶ Ajustar ventana'
         if language == 'es':
             return (
                 'Asistente de IA',
+                fit_label,
                 '⬇ Descargar PDF',
                 'Asistente de IA',
                 '🗂️ ' + ('Ocultar chats' if sessions_open else 'Chats'),
@@ -1189,9 +1367,13 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 'Renombrar conversación...',
                 'Recordarme en este navegador',
                 'Escribe tu pregunta...',
+                # Label shows the *other* language you can switch to.
+                '🌐 English',
             )
+        fit_label = '🗕 Minimize' if (window_state or {}).get('fit') else '⛶ Fit Window'
         return (
             'AI Assistant',
+            fit_label,
             '⬇ Download PDF',
             'AI Assistant',
             '🗂️ ' + ('Hide Chats' if sessions_open else 'Chats'),
@@ -1201,6 +1383,7 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             'Rename conversation...',
             'Remember me on this browser',
             'Ask something...',
+            '🌐 Español',
         )
 
     def _series_for_category(fips, category, indicator):

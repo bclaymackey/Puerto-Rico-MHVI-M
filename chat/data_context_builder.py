@@ -4,6 +4,9 @@ import pandas as pd
 
 from data import get_db_connection, ALLOWED_TABLES
 
+from .hyperparameters import RANKING_TOP_N
+from .report_data_builder import get_report_data
+
 
 CATEGORY_KEYWORDS = [
     # English
@@ -199,10 +202,46 @@ def _top_municipalities(conn, limit: int = 5) -> pd.DataFrame:
 _HIGHER_NOTE = "Higher score means higher vulnerability."
 
 
-def get_data_context(user_input: str, language: str = "en") -> str:
+def get_breakdown_context(municipalities: list) -> str:
+    """All-domain breakdown for the given municipalities (and ONLY those).
+
+    Reuses report_data_builder.get_report_data, which returns the overall score
+    plus every category sub-score for one municipality. Never fetches any
+    municipality not in the provided list.
+    """
+    lines = []
+    for m in municipalities:
+        data = get_report_data(m["name"])
+        if not data or not data.get("categories"):
+            continue
+        parts = []
+        if data.get("overall_score") is not None:
+            parts.append(f"Overall {data['overall_score']}")
+        for display, value in data["categories"].items():
+            parts.append(f"{display} {value}")
+        lines.append(f"{data['municipality']} — " + " | ".join(parts))
+
+    if not lines:
+        return ""
+    return "\n".join(lines) + f"\n{_HIGHER_NOTE}"
+
+
+def get_data_context(
+    user_input: str,
+    language: str = "en",
+    active_munis: list | None = None,
+    active_category: tuple | None = None,
+    wants_overall: bool = False,
+    wants_breakdown: bool = False,
+) -> str:
     """Return a plain-string snapshot of relevant data, or "" if nothing matched.
 
     The LLM uses this together with recent chat history to answer.
+
+    When called from the prompt-context assembler, `active_munis` /
+    `active_category` carry entities forward from earlier turns so follow-ups
+    ("a full breakdown of both") still resolve to the right data. When called
+    directly (legacy), these are None and behavior is unchanged.
     """
     user_input_lower = user_input.lower()
     conn = None
@@ -215,6 +254,20 @@ def get_data_context(user_input: str, language: str = "en") -> str:
         )
         found_munis = find_all_municipalities(user_input_lower, muni_df)
 
+        # Entity carry-over: if the current message named no municipality, use
+        # the active ones resolved from prior turns.
+        if not found_munis and active_munis:
+            found_munis = active_munis
+
+        # Full-breakdown path — overall + all domains for ONLY these munis.
+        if wants_breakdown and found_munis:
+            breakdown = get_breakdown_context(found_munis)
+            if breakdown:
+                return breakdown
+
+        # Carried-forward intent/category fallbacks (from earlier turns).
+        carried_table, carried_display = active_category or (None, None)
+
         # COMPARISON FLOW — two or more municipalities mentioned.
         if len(found_munis) >= 2:
             cat_search = user_input_lower
@@ -222,7 +275,11 @@ def get_data_context(user_input: str, language: str = "en") -> str:
                 cat_search = cat_search.replace(m["name"].lower(), " ")
 
             table, display = _detect_category(cat_search)
-            wants_overall = _is_overall_query(user_input_lower)
+            if not table and carried_table:
+                table, display = carried_table, carried_display
+            wants_overall = (
+                _is_overall_query(user_input_lower) or wants_overall
+            )
 
             if table:
                 pairs = []
@@ -254,21 +311,23 @@ def get_data_context(user_input: str, language: str = "en") -> str:
 
         # RANKING — no specific municipality, ranking-style question.
         if not found_munis and _is_ranking_query(user_input_lower):
-            df = _top_municipalities(conn, limit=5)
+            df = _top_municipalities(conn, limit=RANKING_TOP_N)
             if not df.empty:
                 pairs = [
                     f"{row['name']} ({round(row['value'], 2)})"
                     for _, row in df.iterrows()
                 ]
                 return (
-                    "Top 5 most vulnerable municipalities (latest year), "
+                    f"Top {RANKING_TOP_N} most vulnerable municipalities (latest year), "
                     "ordered from most to least vulnerable: "
                     + ", ".join(pairs)
                     + f". {_HIGHER_NOTE}"
                 )
 
         # SINGLE MUNICIPALITY — overall.
-        if len(found_munis) == 1 and _is_overall_query(user_input_lower):
+        if len(found_munis) == 1 and (
+            _is_overall_query(user_input_lower) or wants_overall
+        ):
             m = found_munis[0]
             val = _fetch_overall_score(conn, m["fips_code"])
             if val is not None:
@@ -283,6 +342,8 @@ def get_data_context(user_input: str, language: str = "en") -> str:
             m = found_munis[0]
             cat_search = user_input_lower.replace(m["name"].lower(), " ")
             table, display = _detect_category(cat_search)
+            if not table and carried_table:
+                table, display = carried_table, carried_display
             if table:
                 val = _fetch_category_score(conn, m["fips_code"], table)
                 if val is not None:
