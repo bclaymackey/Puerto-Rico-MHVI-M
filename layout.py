@@ -382,6 +382,8 @@ def _chat_widget() -> list:
             dcc.Store(id='chat-language-preference', storage_type='local'),
             dcc.Store(id='pending-language-switch'),
             dcc.Store(id='pending-delete-confirm', data=False),
+            dcc.Store(id='chat-generating', data=None),
+            dcc.Store(id='chat-cancelled', data=None),
             dcc.Store(id='chat-session-id', data=str(uuid.uuid4()), storage_type='memory'),
             dcc.Store(id='chat-user-id', storage_type='local'),
             dcc.Store(id='chat-history-tick', data=0),

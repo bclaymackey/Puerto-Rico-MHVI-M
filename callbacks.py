@@ -1069,7 +1069,10 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          Output('chat-session-id', 'data'),
          Output('chat-history-tick', 'data', allow_duplicate=True),
          Output('pending-language-switch', 'data'),
-         Output('pending-delete-confirm', 'data')],
+         Output('pending-delete-confirm', 'data'),
+         Output('chat-send-btn', 'children', allow_duplicate=True),
+         Output('chat-generating', 'data', allow_duplicate=True),
+         Output('chat-cancelled', 'data', allow_duplicate=True)],
         [Input('chat-send-btn', 'n_clicks'),
          Input('chat-input', 'n_submit')],
         [State('chat-input', 'value'),
@@ -1078,15 +1081,36 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
          State('chat-session-id', 'data'),
          State('chat-user-id', 'data'),
          State('chat-history-tick', 'data'),
-         State('pending-delete-confirm', 'data')],
+         State('pending-delete-confirm', 'data'),
+         State('chat-generating', 'data')],
         prevent_initial_call=True,
     )
     def show_user_message(
         n_clicks, n_submit, user_input, messages, language, session_id, user_id,
-        history_tick, delete_pending
+        history_tick, delete_pending, generating
     ):
+        trigger_id = dash.ctx.triggered_id
+
+        # Stop button: the send button clicked while a reply is generating acts
+        # as a Stop — cancel the in-flight reply, drop the typing indicator, and
+        # restore the arrow. (The input keeps whatever the user is typing.)
+        if trigger_id == 'chat-send-btn' and generating:
+            messages = [m for m in (messages or []) if not _is_typing_indicator(m)]
+            return (
+                messages,
+                dash.no_update,
+                None,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                '➤',
+                None,
+                generating,  # mark this nonce cancelled so its result is dropped
+            )
+
         if not (n_clicks or n_submit) or not user_input or not user_input.strip():
-            return (dash.no_update,) * 7
+            return (dash.no_update,) * 10
 
         language = language or 'en'
         command = user_input.strip().lower()
@@ -1095,6 +1119,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         # so a stale "yes" can never delete after an unrelated message.
         clear_confirm = False if delete_pending else dash.no_update
 
+        # Trailing three values are (chat-send-btn.children, chat-generating,
+        # chat-cancelled). Commands don't start a reply, so the send button keeps
+        # its arrow and no generation is started.
         def _bubble_reply(message):
             """Append an assistant bubble, clear input, no other side effects."""
             return (
@@ -1112,6 +1139,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 dash.no_update,
                 dash.no_update,
                 clear_confirm,
+                '➤',
+                None,
+                dash.no_update,
             )
 
         if command in {'/new', '/session'}:
@@ -1123,17 +1153,20 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 (history_tick or 0) + 1,
                 dash.no_update,
                 clear_confirm,
+                '➤',
+                None,
+                dash.no_update,
             )
 
         # ── Language switch commands ────────────────────────────────────────
         if command in {'/spanish', '/español', '/es'}:
             reply = 'Idioma cambiado a Español.' if language != 'es' else 'Ya estás en Español.'
             base = _bubble_reply(reply)
-            return (*base[:5], 'es', clear_confirm)
+            return (*base[:5], 'es', clear_confirm, '➤', None, dash.no_update)
         if command in {'/english', '/en'}:
             reply = 'Language switched to English.' if language != 'en' else 'Already in English.'
             base = _bubble_reply(reply)
-            return (*base[:5], 'en', clear_confirm)
+            return (*base[:5], 'en', clear_confirm, '➤', None, dash.no_update)
 
         # ── Delete all history (ask for confirmation first) ─────────────────
         if command == '/delete':
@@ -1154,6 +1187,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                     (history_tick or 0) + 1,
                     dash.no_update,
                     False,
+                    '➤',
+                    None,
+                    dash.no_update,
                 )
             prompt = (
                 '¿Estás seguro de que deseas eliminar todo el historial de chat y '
@@ -1165,11 +1201,11 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 'confirm, or /cancel to cancel.'
             )
             base = _bubble_reply(prompt)
-            return (*base[:6], True)
+            return (*base[:6], True, '➤', None, dash.no_update)
         if command == '/cancel':
             reply = 'Cancelado.' if language == 'es' else 'Cancelled.'
             base = _bubble_reply(reply)
-            return (*base[:6], False)
+            return (*base[:6], False, '➤', None, dash.no_update)
 
         if command == '/name' or command.startswith('/name '):
             name = user_input.strip()[len('/name'):].strip()
@@ -1211,37 +1247,50 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         )
         messages.append(_typing_bubble())
 
+        nonce = uuid.uuid4().hex
         return (
             messages,
             '',
-            {'text': user_input, 'n': n_clicks},
+            {'text': user_input, 'n': n_clicks, 'nonce': nonce},
             dash.no_update,
             dash.no_update,
             dash.no_update,
             clear_confirm,
+            # While generating, the send button becomes a Stop control (theme
+            # color kept via CSS). Input stays enabled so the user can keep
+            # typing; clicking Stop cancels this reply (via the nonce).
+            '■',
+            nonce,
+            dash.no_update,
         )
 
     @app.callback(
         [Output('chat-messages', 'children', allow_duplicate=True),
          Output('chat-history-tick', 'data', allow_duplicate=True),
-         Output('pending-report', 'data', allow_duplicate=True)],
+         Output('pending-report', 'data', allow_duplicate=True),
+         Output('chat-send-btn', 'children', allow_duplicate=True),
+         Output('chat-generating', 'data', allow_duplicate=True)],
         Input('pending-user-message', 'data'),
         [State('chat-messages', 'children'),
          State('chat-language', 'data'),
          State('chat-session-id', 'data'),
          State('chat-user-id', 'data'),
-         State('chat-history-tick', 'data')],
+         State('chat-history-tick', 'data'),
+         State('chat-cancelled', 'data')],
         prevent_initial_call=True,
     )
-    def generate_ai_response(pending, messages, language, session_id, user_id, tick):
+    def generate_ai_response(
+        pending, messages, language, session_id, user_id, tick, cancelled
+    ):
         if not pending or not pending.get('text'):
-            return dash.no_update, dash.no_update, dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, '➤', None
 
         print(
             f"[generate_ai_response] text={pending.get('text')!r} "
             f"session_id={session_id!r} user_id={user_id!r} language={language!r}"
         )
 
+        nonce = pending.get('nonce')
         try:
             ai_response = process_chat_message(
                 pending['text'], language or 'en', session_id, user_id,
@@ -1252,6 +1301,14 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 "kind": "text",
                 "text": "The AI assistant is currently unavailable.",
             }
+
+        # If the user pressed Stop while this reply was generating, discard it.
+        # (The response is already saved in chat.db, but we don't render a bubble
+        # and we don't bump the tick — the Stop handler already removed the
+        # typing indicator and restored the arrow.)
+        if nonce and cancelled == nonce:
+            print("[generate_ai_response] cancelled by user, dropping reply")
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, None
 
         messages = [m for m in (messages or []) if not _is_typing_indicator(m)]
 
@@ -1283,7 +1340,8 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                 )
             )
 
-        return messages, (tick or 0) + 1, pending_report_update
+        # Reply is ready — restore the arrow and clear the generating flag.
+        return messages, (tick or 0) + 1, pending_report_update, '➤', None
 
     @app.callback(
         Output('download-pdf', 'data'),

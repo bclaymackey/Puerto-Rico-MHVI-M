@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import re
 
-from .chat_db import get_chat_db_connection
+from mongodb import chat_dal
 from .hyperparameters import (
     CANDIDATE_LIMIT_MULTIPLIER as _CANDIDATE_LIMIT_MULTIPLIER,
     ENTITY_BOOST as _ENTITY_BOOST,
@@ -282,55 +282,15 @@ def _is_edit_distance_at_most_one(a: str, b: str) -> bool:
 
 
 def _collect_recent_session_ids(
-    conn,
     session_id: str,
     user_id: str,
     limit: int = _RECENT_OTHER_SESSION_WINDOW,
 ) -> list[str]:
-    rows = conn.execute(
-        """
-        SELECT id
-        FROM sessions
-        WHERE user_id = ? AND id != ?
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (user_id, session_id, limit),
-    ).fetchall()
-    return [row[0] for row in rows]
+    return chat_dal.recent_other_session_ids(session_id, user_id, limit)
 
 
-def _collect_session_messages(conn, session_ids: list[str]) -> dict[str, list[dict]]:
-    if not session_ids:
-        return {}
-    placeholders = ",".join("?" for _ in session_ids)
-    rows = conn.execute(
-        f"""
-        SELECT
-            m.id,
-            m.session_id,
-            m.role,
-            COALESCE(m.timestamp, s.created_at) AS event_at,
-            m.content
-        FROM messages AS m
-        JOIN sessions AS s ON s.id = m.session_id
-        WHERE m.session_id IN ({placeholders})
-        ORDER BY m.session_id, m.id
-        """,
-        session_ids,
-    ).fetchall()
-    messages_by_session: dict[str, list[dict]] = defaultdict(list)
-    for message_id, matched_session_id, role, event_at, content in rows:
-        messages_by_session[matched_session_id].append(
-            {
-                "id": message_id,
-                "session_id": matched_session_id,
-                "role": role,
-                "event_at": event_at,
-                "content": content or "",
-            }
-        )
-    return dict(messages_by_session)
+def _collect_session_messages(session_ids: list[str]) -> dict[str, list[dict]]:
+    return chat_dal.messages_for_sessions(session_ids)
 
 
 def _collect_recent_vocabulary_tokens(messages_by_session: dict[str, list[dict]]) -> set[str]:
@@ -659,159 +619,149 @@ def search_cross_session_memory(
             reason="skipped_no_user_or_terms",
         )
 
-    conn = get_chat_db_connection()
-    try:
-        recent_other_sessions = _collect_recent_session_ids(conn, session_id, user_id)
-        if not recent_other_sessions:
-            return LexicalSearchResult(
-                raw_query=user_message,
-                normalized_query=normalized_query,
-                terms=terms,
-                expanded_terms=[],
-                recent_other_sessions=[],
-                db_hits=[],
-                selected_pairs=[],
-                memory_context="",
-                reason="no_other_sessions",
-            )
-
-        messages_by_session = _collect_session_messages(conn, recent_other_sessions)
-        vocabulary = _collect_recent_vocabulary_tokens(messages_by_session)
-        expanded_terms = _expand_terms_with_recent_vocabulary(terms, vocabulary)
-        term_specs = _build_term_specs(terms, expanded_terms)
-        conn.create_function("lexical_score", 3, _lexical_score)
-
-        placeholders = ",".join("?" for _ in recent_other_sessions)
-        spec_blob = _serialize_term_specs(term_specs)
-        candidate_limit = max(24, max_messages * _CANDIDATE_LIMIT_MULTIPLIER)
-        rows = conn.execute(
-            f"""
-            SELECT
-                m.id AS message_id,
-                m.session_id,
-                m.role,
-                COALESCE(m.timestamp, s.created_at) AS event_at,
-                m.content,
-                lexical_score(m.content, ?, ?) AS score
-            FROM messages AS m
-            JOIN sessions AS s ON s.id = m.session_id
-            WHERE s.user_id = ?
-              AND m.session_id != ?
-              AND m.session_id IN ({placeholders})
-            ORDER BY
-                score DESC,
-                CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END DESC,
-                event_at DESC,
-                m.id DESC
-            LIMIT ?
-            """,
-            [
-                normalized_query,
-                spec_blob,
-                user_id,
-                session_id,
-                *recent_other_sessions,
-                candidate_limit,
-            ],
-        ).fetchall()
-
-        db_hits = [
-            MessageHit(
-                message_id=message_id,
-                session_id=matched_session_id,
-                role=role,
-                event_at=event_at,
-                content=content or "",
-                score=score,
-            )
-            for message_id, matched_session_id, role, event_at, content, score in rows
-            if score > 0
-        ]
-
-        pair_candidates: list[MemoryPair] = []
-        seen_pair_keys = set()
-        for hit in db_hits:
-            pair = _build_memory_pair(
-                hit, messages_by_session, term_specs, entity_terms
-            )
-            if not pair:
-                continue
-            pair_key = (pair.session_id, pair.user_message_id, pair.assistant_message_id)
-            if pair_key in seen_pair_keys:
-                continue
-            seen_pair_keys.add(pair_key)
-            pair_candidates.append(pair)
-
-        pair_candidates.sort(
-            key=lambda pair: (
-                pair.is_definition,
-                not pair.is_negative,
-                pair.pair_score,
-                pair.event_at,
-                pair.source_message_id,
-            ),
-            reverse=True,
-        )
-        pair_candidates = _filter_pair_candidates(
-            pair_candidates,
-            normalized_query=normalized_query,
-            terms=terms,
-            expanded_terms=expanded_terms,
-        )
-
-        selected_pairs: list[MemoryPair] = []
-        selected_message_ids = set()
-        session_pair_counts: dict[str, int] = defaultdict(int)
-        memory_message_count = 0
-        for pair in pair_candidates:
-            if session_pair_counts[pair.session_id] >= _MAX_SESSION_PAIRS:
-                continue
-
-            message_ids = {
-                message_id
-                for message_id in (pair.user_message_id, pair.assistant_message_id)
-                if message_id is not None
-            }
-            if message_ids and message_ids.issubset(selected_message_ids):
-                continue
-
-            pair_message_count = len(message_ids)
-            if memory_message_count + pair_message_count > max_messages:
-                continue
-
-            selected_pairs.append(pair)
-            selected_message_ids.update(message_ids)
-            session_pair_counts[pair.session_id] += 1
-            memory_message_count += pair_message_count
-
-            if memory_message_count >= max_messages:
-                break
-
-        memory_blocks = "\n\n".join(
-            block for block in (_pair_to_memory_block(pair) for pair in selected_pairs) if block
-        )
-        resolved_summary = _build_resolved_memory_summary(
-            selected_pairs=selected_pairs,
-            normalized_query=normalized_query,
-            terms=terms,
-            expanded_terms=expanded_terms,
-        )
-        if resolved_summary and memory_blocks:
-            memory_context = (
-                f"{resolved_summary}\n\n"
-                f"Supporting retrieved history:\n{memory_blocks}"
-            )
-        else:
-            memory_context = resolved_summary or memory_blocks
+    recent_other_sessions = _collect_recent_session_ids(session_id, user_id)
+    if not recent_other_sessions:
         return LexicalSearchResult(
             raw_query=user_message,
             normalized_query=normalized_query,
             terms=terms,
-            expanded_terms=expanded_terms,
-            recent_other_sessions=recent_other_sessions,
-            db_hits=db_hits,
-            selected_pairs=selected_pairs,
-            memory_context=memory_context,
+            expanded_terms=[],
+            recent_other_sessions=[],
+            db_hits=[],
+            selected_pairs=[],
+            memory_context="",
+            reason="no_other_sessions",
         )
-    finally:
-        conn.close()
+
+    messages_by_session = _collect_session_messages(recent_other_sessions)
+    vocabulary = _collect_recent_vocabulary_tokens(messages_by_session)
+    expanded_terms = _expand_terms_with_recent_vocabulary(terms, vocabulary)
+    term_specs = _build_term_specs(terms, expanded_terms)
+
+    spec_blob = _serialize_term_specs(term_specs)
+    candidate_limit = max(24, max_messages * _CANDIDATE_LIMIT_MULTIPLIER)
+
+    # MongoDB has no in-query Python UDF, so we fetch the candidate messages via
+    # the $text index (union with any also present in messages_by_session so the
+    # exact/substring scoring bonuses are never missed) and score in Python with
+    # the same _lexical_score used before. Ranking is reproduced exactly:
+    #   score DESC, assistant-before-user, event_at DESC, id DESC.
+    search_text = " ".join(dict.fromkeys(terms + expanded_terms))
+    candidate_map: dict[int, dict] = {}
+    for candidate in chat_dal.text_search_candidates(recent_other_sessions, search_text):
+        candidate_map[candidate["id"]] = candidate
+    for msgs in messages_by_session.values():
+        for msg in msgs:
+            candidate_map.setdefault(msg["id"], msg)
+
+    scored = []
+    for candidate in candidate_map.values():
+        score = _lexical_score(candidate["content"], normalized_query, spec_blob)
+        if score > 0:
+            scored.append((candidate, score))
+    scored.sort(
+        key=lambda item: (
+            item[1],
+            1 if item[0]["role"] == "assistant" else 0,
+            item[0]["event_at"] or "",
+            item[0]["id"],
+        ),
+        reverse=True,
+    )
+    scored = scored[:candidate_limit]
+
+    db_hits = [
+        MessageHit(
+            message_id=candidate["id"],
+            session_id=candidate["session_id"],
+            role=candidate["role"],
+            event_at=candidate["event_at"],
+            content=candidate["content"] or "",
+            score=score,
+        )
+        for candidate, score in scored
+    ]
+
+    pair_candidates: list[MemoryPair] = []
+    seen_pair_keys = set()
+    for hit in db_hits:
+        pair = _build_memory_pair(hit, messages_by_session, term_specs, entity_terms)
+        if not pair:
+            continue
+        pair_key = (pair.session_id, pair.user_message_id, pair.assistant_message_id)
+        if pair_key in seen_pair_keys:
+            continue
+        seen_pair_keys.add(pair_key)
+        pair_candidates.append(pair)
+
+    pair_candidates.sort(
+        key=lambda pair: (
+            pair.is_definition,
+            not pair.is_negative,
+            pair.pair_score,
+            pair.event_at,
+            pair.source_message_id,
+        ),
+        reverse=True,
+    )
+    pair_candidates = _filter_pair_candidates(
+        pair_candidates,
+        normalized_query=normalized_query,
+        terms=terms,
+        expanded_terms=expanded_terms,
+    )
+
+    selected_pairs: list[MemoryPair] = []
+    selected_message_ids = set()
+    session_pair_counts: dict[str, int] = defaultdict(int)
+    memory_message_count = 0
+    for pair in pair_candidates:
+        if session_pair_counts[pair.session_id] >= _MAX_SESSION_PAIRS:
+            continue
+
+        message_ids = {
+            message_id
+            for message_id in (pair.user_message_id, pair.assistant_message_id)
+            if message_id is not None
+        }
+        if message_ids and message_ids.issubset(selected_message_ids):
+            continue
+
+        pair_message_count = len(message_ids)
+        if memory_message_count + pair_message_count > max_messages:
+            continue
+
+        selected_pairs.append(pair)
+        selected_message_ids.update(message_ids)
+        session_pair_counts[pair.session_id] += 1
+        memory_message_count += pair_message_count
+
+        if memory_message_count >= max_messages:
+            break
+
+    memory_blocks = "\n\n".join(
+        block for block in (_pair_to_memory_block(pair) for pair in selected_pairs) if block
+    )
+    resolved_summary = _build_resolved_memory_summary(
+        selected_pairs=selected_pairs,
+        normalized_query=normalized_query,
+        terms=terms,
+        expanded_terms=expanded_terms,
+    )
+    if resolved_summary and memory_blocks:
+        memory_context = (
+            f"{resolved_summary}\n\n"
+            f"Supporting retrieved history:\n{memory_blocks}"
+        )
+    else:
+        memory_context = resolved_summary or memory_blocks
+    return LexicalSearchResult(
+        raw_query=user_message,
+        normalized_query=normalized_query,
+        terms=terms,
+        expanded_terms=expanded_terms,
+        recent_other_sessions=recent_other_sessions,
+        db_hits=db_hits,
+        selected_pairs=selected_pairs,
+        memory_context=memory_context,
+    )

@@ -6,7 +6,8 @@ new messages have accumulated, so it adds roughly one cheap LLM call per several
 turns — not per turn. Reuses the existing OpenAI client (no new dependency).
 """
 
-from .chat_db import get_chat_db_connection, get_session_summary, update_session_summary
+from mongodb import chat_dal
+from .chat_db import get_session_summary, update_session_summary
 from .hyperparameters import (
     LLM_MODEL,
     SUMMARY_TRIGGER_MESSAGES as _SUMMARY_TRIGGER_MESSAGES,
@@ -25,16 +26,7 @@ _SUMMARY_INSTRUCTIONS = (
 
 
 def _new_messages(session_id: str, after_id: int) -> list[tuple[int, str, str]]:
-    conn = get_chat_db_connection()
-    try:
-        rows = conn.execute(
-            "SELECT id, role, content FROM messages "
-            "WHERE session_id = ? AND id > ? ORDER BY id",
-            (session_id, after_id),
-        ).fetchall()
-    finally:
-        conn.close()
-    return rows
+    return chat_dal.new_messages_after(session_id, after_id)
 
 
 def maybe_update_summary(session_id: str) -> None:

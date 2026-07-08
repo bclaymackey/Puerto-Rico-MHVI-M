@@ -113,8 +113,8 @@ def build_prompt_context(
     Returns the pieces ai_service spreads into call_llm. Note build_llm_context
     also appends the current user message to history (existing behavior).
     """
-    # Layer 2 — recent raw turns (also records the user message).
-    history = build_llm_context(session_id, user_input)
+    # Layer 2 — recent raw turns (also records the user message in `language`).
+    history = build_llm_context(session_id, user_input, language=language)
 
     # Layer 3 — rolling summary.
     summary_context = get_session_summary(session_id)["running_summary"] or ""

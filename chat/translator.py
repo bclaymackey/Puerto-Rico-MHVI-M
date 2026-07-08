@@ -1,9 +1,11 @@
-"""Translate chat text between English and Spanish for bilingual storage.
+"""Translate chat text between English and Spanish (lazy, on-demand).
 
-Every message, title, and summary is stored in both languages (see chat_db
-schema). The original text is kept verbatim in its own language column; this
-helper produces the copy for the other language, reusing the same OpenAI client
-and model the rest of the chat stack uses.
+The main chat call already returns the assistant reply in both languages, so no
+translation happens per turn. This helper is used only for the *lazy* backfill:
+the first time a session is viewed in a language a row wasn't written in (the
+user's typed message, a short templated reply, a renamed title, or a legacy
+row), the missing side is translated once and cached in the DB. Reuses the same
+OpenAI client and model as the rest of the chat stack.
 """
 
 from .hyperparameters import LLM_MODEL
@@ -38,17 +40,6 @@ def translate_text(text: str | None, target_lang: str) -> str:
         )
         translated = (response.output_text or "").strip()
         return translated or text
-    except Exception as e:  # noqa: BLE001 - never block a save on translation
+    except Exception as e:  # noqa: BLE001 - never block a read on translation
         print(f"[translate_text] error: {e}")
         return text
-
-
-def make_bilingual(text: str | None, source_lang: str) -> tuple[str, str]:
-    """Return (english_text, spanish_text) for `text` written in `source_lang`.
-
-    The source-language slot holds the original verbatim; the other is translated.
-    """
-    source_lang = "es" if source_lang == "es" else "en"
-    if source_lang == "es":
-        return translate_text(text, "en"), (text or "")
-    return (text or ""), translate_text(text, "es")

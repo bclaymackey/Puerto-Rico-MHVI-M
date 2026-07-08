@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel
 
 from .hyperparameters import LLM_MODEL
 from .prompt import SYSTEM_PROMPT
@@ -12,16 +13,39 @@ load_dotenv()
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def _language_directive(language: str) -> str:
-    if language == "es":
-        return (
-            "Respond entirely in Spanish. Never mix languages in the same "
-            "response unless the user explicitly asks."
-        )
-    return (
-        "Respond entirely in English. Never mix languages in the same "
-        "response unless the user explicitly asks."
-    )
+class BilingualReply(BaseModel):
+    """Structured reply: the answer plus a session title, both bilingual.
+
+    The single generation call returns everything the UI shows — the assistant
+    message and the conversation's title — in both languages, so no extra
+    translation or title-generation call is ever needed. `query` echoes the most
+    recent user message for logging/clarity only (it is never used to overwrite
+    stored history).
+    """
+
+    query: str
+    query_en: str
+    query_es: str
+    en: str
+    es: str
+    title_en: str
+    title_es: str
+
+
+# The answer and a short session title are produced in both languages in one
+# call. Whatever the user sees in the chat must exist in both languages.
+_BILINGUAL_DIRECTIVE = (
+    "First, echo the user's most recent message verbatim in the 'query' field "
+    "(for logging), and provide that same user message translated into English "
+    "in 'query_en' and into Spanish in 'query_es' (a faithful translation, "
+    "nothing added or removed). Then answer: put the SAME answer in 'en' "
+    "(English) and 'es' (Spanish) — identical content, no information added, "
+    "dropped, or reordered between them, with Markdown, numbers, and proper "
+    "nouns (municipality and indicator names) kept identical. Also return a "
+    "short 3–6 word title summarizing what THIS conversation is about, in "
+    "'title_en' (English) and 'title_es' (Spanish); the two titles must mean "
+    "the same thing."
+)
 
 
 def call_llm(
@@ -31,7 +55,14 @@ def call_llm(
     user_name: str | None = None,
     memory_context: str = "",
     summary_context: str = "",
-) -> str:
+) -> dict:
+    """Return the answer, title, and user query — all bilingual — from one call.
+
+    Shape: {"query", "query_en", "query_es", "en", "es", "title_en",
+    "title_es"}. `query` is the raw echo of the latest user message (logging);
+    `query_en`/`query_es` are that message translated, so the user turn is stored
+    bilingually with no extra call.
+    """
     name_directive = (
         f"The user's preferred name is {user_name}. Use it very sparingly — at "
         "most an occasional greeting or a warm moment. Do NOT begin replies with "
@@ -69,7 +100,7 @@ def call_llm(
     )
     instructions = (
         f"{SYSTEM_PROMPT}\n\n"
-        f"{_language_directive(language)}\n\n"
+        f"{_BILINGUAL_DIRECTIVE}\n\n"
         f"{name_directive}\n\n"
         f"{summary_directive}\n\n"
         f"{memory_directive}\n\n"
@@ -82,12 +113,36 @@ def call_llm(
         print("[call_llm data_context]", data_context or "<empty>")
         print("[call_llm summary_context]", summary_context or "<empty>")
         print("[call_llm memory_context]", memory_context or "<empty>")
-        response = openai_client.responses.create(
+        response = openai_client.responses.parse(
             model=LLM_MODEL,
             instructions=instructions,
             input=chat_history_context,
+            text_format=BilingualReply,
         )
-        return response.output_text
+        reply = response.output_parsed
+        if reply is None:
+            raise ValueError("no parsed output")
+        # Print the raw structured response to the console the moment it returns.
+        print("[call_llm raw response]", reply.model_dump_json(indent=2))
+        return {
+            "query": reply.query,
+            "query_en": reply.query_en,
+            "query_es": reply.query_es,
+            "en": reply.en,
+            "es": reply.es,
+            "title_en": reply.title_en,
+            "title_es": reply.title_es,
+        }
     except Exception as e:
         print(e)
-        return "The AI assistant is currently unavailable."
+        unavailable = "The AI assistant is currently unavailable."
+        unavailable_es = "El asistente de IA no está disponible en este momento."
+        return {
+            "query": "",
+            "query_en": "",
+            "query_es": "",
+            "en": unavailable,
+            "es": unavailable_es,
+            "title_en": "",
+            "title_es": "",
+        }

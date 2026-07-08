@@ -7,7 +7,12 @@ import pandas as pd
 from data import get_db_connection
 
 from .chat_db import ensure_session, ensure_user
-from .chat_history_manager import build_llm_context, save_ai_response
+from .chat_history_manager import (
+    build_llm_context,
+    save_ai_response,
+    save_ai_response_bilingual,
+    set_last_user_message_languages,
+)
 from .data_context_builder import find_all_municipalities
 from .llm_caller import call_llm
 from .navigation_guide import build_navigation_response, is_navigation_intent
@@ -171,7 +176,7 @@ def process_chat_message(
         return {"kind": "text", "text": steps}
 
     ctx = build_prompt_context(session_id, user_id, user_input, language)
-    ai_response = call_llm(
+    reply = call_llm(
         ctx["history"],
         ctx["data_context"],
         language,
@@ -179,6 +184,17 @@ def process_chat_message(
         memory_context=ctx["memory_context"],
         summary_context=ctx["summary_context"],
     )
-    save_ai_response(session_id, ai_response, language)
+    # One call returns the answer, title, AND the user query — all bilingual.
+    # Backfill the just-saved user message so its Spanish/English copies are ready
+    # (no lazy translation on switch), then save the assistant reply + title.
+    set_last_user_message_languages(
+        session_id, reply.get("query_en"), reply.get("query_es")
+    )
+    text_en, text_es = reply["en"], reply["es"]
+    save_ai_response_bilingual(
+        session_id, text_en, text_es, language,
+        title_en=reply.get("title_en"), title_es=reply.get("title_es"),
+    )
     maybe_update_summary(session_id)
-    return {"kind": "text", "text": ai_response}
+    active_text = text_es if language == "es" else text_en
+    return {"kind": "text", "text": active_text}

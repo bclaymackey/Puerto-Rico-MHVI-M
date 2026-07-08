@@ -10,7 +10,7 @@ import pandas as pd
 
 from data import get_db_connection
 
-from .chat_db import get_chat_db_connection
+from mongodb import chat_dal
 from .data_context_builder import (
     _is_comparison_query,
     _is_overall_query,
@@ -38,16 +38,7 @@ def _wants_breakdown(text_lower: str) -> bool:
 
 def _recent_session_messages(session_id: str) -> list[str]:
     """Return recent message contents for this session, newest first."""
-    conn = get_chat_db_connection()
-    try:
-        rows = conn.execute(
-            "SELECT content FROM messages WHERE session_id = ? "
-            "ORDER BY id DESC LIMIT ?",
-            (session_id, _CARRY_OVER_SCAN_LIMIT),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [row[0] or "" for row in rows]
+    return chat_dal.recent_session_message_contents(session_id, _CARRY_OVER_SCAN_LIMIT)
 
 
 def resolve_active_entities(session_id: str, user_input: str) -> dict:
