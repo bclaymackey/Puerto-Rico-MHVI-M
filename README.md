@@ -10,6 +10,12 @@ python -m pip install -r requirements.txt
 python MHVIM_Dashboard_App.py
 ```
 
+```bash
+cd /Users/sreekanthgopi/desktop/Maria/Puerto-Rico-MHVI-M-final-version
+source .venv/bin/activate
+python MHVIM_Dashboard_App.py
+```
+
 Open http://127.0.0.1:8050.
 
 ## Chat history

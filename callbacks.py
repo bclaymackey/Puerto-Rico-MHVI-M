@@ -21,6 +21,22 @@ from chat import (
     set_user_name,
 )
 
+from flask import after_this_request, request
+
+from auth.routes import current_user_id, COOKIE, _cookie_secure
+from auth.core import (
+    login as auth_login,
+    signup as auth_signup,
+    create_session,
+    revoke_session,
+    get_public_user,
+    change_password,
+    set_security_question,
+    get_security_question,
+    reset_password_with_answer,
+)
+from mongodb.chat_dal import get_name_prompted, set_name_prompted, get_user_name
+
 from data import (
     fetch_map_data,
     fetch_municipality_name,
@@ -35,19 +51,236 @@ from data import (
 
 def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=None) -> None:
 
-    # Assign a stable anonymous user id (persisted in browser local storage) on
-    # first load if one isn't already present.
-    app.clientside_callback(
-        """
-        function(_) {
-            const existing = window.localStorage.getItem('chat-user-id');
-            if (existing) { return window.dash_clientside.no_update; }
-            return crypto.randomUUID();
-        }
-        """,
+    # Resolve the logged-in user id from the auth session cookie on each page load.
+    # This replaces the old anonymous browser-UUID identity: user_id now comes from
+    # the MongoDB account (or None when not logged in, which triggers the auth gate).
+    @app.callback(
         Output('chat-user-id', 'data'),
         Input('chat-user-id', 'modified_timestamp'),
     )
+    def resolve_chat_user_id(_):
+        return current_user_id()
+
+    def _attach_session_cookie(raw_token: str, remember: bool):
+        """Queue a Set-Cookie header on the current callback's HTTP response."""
+        max_age = 60 * 60 * 24 * (30 if remember else 1)
+
+        @after_this_request
+        def _set(response):
+            response.set_cookie(
+                COOKIE, raw_token, httponly=True, secure=_cookie_secure(),
+                samesite='Lax', max_age=max_age,
+            )
+            return response
+
+    # Full-page gate: show the login page and hide the app body when logged out;
+    # reveal the app and hide the login page once authenticated. The site lands
+    # on the login page for anonymous visitors.
+    @app.callback(
+        [Output('login-page', 'style'),
+         Output('app-body', 'style')],
+        Input('chat-user-id', 'data'),
+        [State('login-page', 'style'),
+         State('app-body', 'style')],
+    )
+    def toggle_site_gate(user_id, login_style, body_style):
+        login_style = dict(login_style or {})
+        body_style = dict(body_style or {})
+        if user_id:
+            login_style['display'] = 'none'
+            body_style['display'] = 'block'
+        else:
+            login_style['display'] = 'flex'
+            body_style['display'] = 'none'
+        return login_style, body_style
+
+    # Toggle the form between login and signup: show/hide the confirm field, swap
+    # the button label and the prompt text.
+    @app.callback(
+        [Output('auth-mode', 'data'),
+         Output('auth-title', 'children'),
+         Output('auth-submit-btn', 'children'),
+         Output('auth-confirm', 'style'),
+         Output('auth-toggle-prompt', 'children'),
+         Output('auth-toggle-link', 'children'),
+         Output('auth-error', 'children', allow_duplicate=True)],
+        Input('auth-toggle-link', 'n_clicks'),
+        State('auth-mode', 'data'),
+        prevent_initial_call=True,
+    )
+    def toggle_auth_mode(_clicks, mode):
+        from layout import _AUTH_INPUT_STYLE
+        going_signup = (mode or 'login') == 'login'
+        confirm_style = dict(_AUTH_INPUT_STYLE)
+        confirm_style['display'] = 'block' if going_signup else 'none'
+        if going_signup:
+            return ('signup', 'Create an account', 'Sign up', confirm_style,
+                    'Have an account? ', 'Log in', '')
+        return ('login', 'Sign in', 'Log in', confirm_style,
+                'No account? ', 'Sign up', '')
+
+    # Submit login or signup. On success, set the session cookie and populate
+    # chat-user-id (which hides the overlay via the gate callback above).
+    @app.callback(
+        [Output('chat-user-id', 'data', allow_duplicate=True),
+         Output('auth-error', 'children', allow_duplicate=True)],
+        Input('auth-submit-btn', 'n_clicks'),
+        [State('auth-mode', 'data'),
+         State('auth-email', 'value'),
+         State('auth-password', 'value'),
+         State('auth-confirm', 'value')],
+        prevent_initial_call=True,
+    )
+    def submit_auth(n_clicks, mode, email, password, confirm):
+        if not n_clicks:
+            return dash.no_update, dash.no_update
+        email = (email or '').strip()
+        password = password or ''
+        if (mode or 'login') == 'signup':
+            if password != (confirm or ''):
+                return dash.no_update, 'Passwords do not match.'
+            user, err = auth_signup(email, password)
+        else:
+            user, err = auth_login(email, password)
+        if err:
+            return dash.no_update, err
+        raw = create_session(user['userId'], remember=True)
+        _attach_session_cookie(raw, remember=True)
+        return user['userId'], ''
+
+    # Sign out: revoke the server-side session, clear the cookie, and drop the
+    # user id (which re-shows the login page via the gate).
+    @app.callback(
+        Output('chat-user-id', 'data', allow_duplicate=True),
+        Input('sign-out-btn', 'n_clicks'),
+        prevent_initial_call=True,
+    )
+    def sign_out(n_clicks):
+        if not n_clicks:
+            return dash.no_update
+        revoke_session(request.cookies.get(COOKIE))
+
+        @after_this_request
+        def _clear(response):
+            response.delete_cookie(COOKIE)
+            return response
+
+        return None
+
+    # Open/close the account settings panel (gear button).
+    @app.callback(
+        Output('account-panel', 'style'),
+        Input('account-menu-btn', 'n_clicks'),
+        State('account-panel', 'style'),
+        prevent_initial_call=True,
+    )
+    def toggle_account_panel(n_clicks, style):
+        style = dict(style or {})
+        style['display'] = 'none' if style.get('display') == 'block' else 'block'
+        return style
+
+    # Show the logged-in account's email at the top of the settings panel.
+    @app.callback(
+        Output('account-email', 'children'),
+        Input('chat-user-id', 'data'),
+    )
+    def show_account_email(user_id):
+        if not user_id:
+            return ''
+        user = get_public_user(user_id)
+        return user['email'] if user else ''
+
+    # Change password from the account panel.
+    @app.callback(
+        [Output('account-pw-msg', 'children'),
+         Output('account-current-pw', 'value'),
+         Output('account-new-pw', 'value')],
+        Input('account-change-pw-btn', 'n_clicks'),
+        [State('chat-user-id', 'data'),
+         State('account-current-pw', 'value'),
+         State('account-new-pw', 'value')],
+        prevent_initial_call=True,
+    )
+    def change_pw(n_clicks, user_id, current, new):
+        if not n_clicks:
+            return dash.no_update, dash.no_update, dash.no_update
+        if not user_id:
+            return 'Please log in again.', dash.no_update, dash.no_update
+        ok, err = change_password(user_id, current or '', new or '')
+        if ok:
+            return 'Password updated.', '', ''
+        return err, dash.no_update, dash.no_update
+
+    # Save an optional security question + answer from the account panel.
+    @app.callback(
+        [Output('account-secq-msg', 'children'),
+         Output('account-seca', 'value')],
+        Input('account-secq-btn', 'n_clicks'),
+        [State('chat-user-id', 'data'),
+         State('account-secq', 'value'),
+         State('account-seca', 'value')],
+        prevent_initial_call=True,
+    )
+    def save_security_question(n_clicks, user_id, question, answer):
+        if not n_clicks:
+            return dash.no_update, dash.no_update
+        if not user_id:
+            return 'Please log in again.', dash.no_update
+        ok, err = set_security_question(user_id, question or '', answer or '')
+        if ok:
+            return 'Security question saved.', ''  # clear the answer field
+        return err, dash.no_update
+
+    # Show/hide the forgot-password card (link opens it, "back" closes it).
+    @app.callback(
+        Output('forgot-card', 'style'),
+        [Input('forgot-link', 'n_clicks'),
+         Input('forgot-back', 'n_clicks')],
+        State('forgot-card', 'style'),
+        prevent_initial_call=True,
+    )
+    def toggle_forgot_card(open_clicks, back_clicks, style):
+        style = dict(style or {})
+        style['display'] = 'none' if dash.ctx.triggered_id == 'forgot-back' else 'block'
+        return style
+
+    # Step 1: look up the account's security question by email.
+    @app.callback(
+        [Output('forgot-question', 'children'),
+         Output('forgot-step2', 'style'),
+         Output('forgot-msg', 'children', allow_duplicate=True)],
+        Input('forgot-lookup-btn', 'n_clicks'),
+        State('forgot-email', 'value'),
+        prevent_initial_call=True,
+    )
+    def forgot_lookup(n_clicks, email):
+        if not n_clicks:
+            return dash.no_update, dash.no_update, dash.no_update
+        question = get_security_question(email or '')
+        if not question:
+            # Same message whether the email is unknown or has no question set,
+            # so this can't be used to probe which emails have accounts.
+            return '', {'display': 'none'}, (
+                'No security question is set for that email. Ask an admin to reset it.'
+            )
+        return f'Q: {question}', {'display': 'block', 'marginTop': '14px'}, ''
+
+    # Step 2: verify the answer and set a new password.
+    @app.callback(
+        Output('forgot-msg', 'children', allow_duplicate=True),
+        Input('forgot-reset-btn', 'n_clicks'),
+        [State('forgot-email', 'value'),
+         State('forgot-answer', 'value'),
+         State('forgot-newpw', 'value')],
+        prevent_initial_call=True,
+    )
+    def forgot_reset(n_clicks, email, answer, new_pw):
+        if not n_clicks:
+            return dash.no_update
+        ok, err = reset_password_with_answer(email or '', answer or '', new_pw or '')
+        if ok:
+            return 'Password reset. You can now sign in with your new password.'
+        return err
 
     @app.callback(
         Output('pr-map', 'figure'),
@@ -989,36 +1222,51 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
 
     @app.callback(
         [Output('chat-language', 'data', allow_duplicate=True),
-         Output('chat-language-preference', 'data', allow_duplicate=True)],
+         Output('chat-language-preference', 'data', allow_duplicate=True),
+         Output('chat-messages', 'children', allow_duplicate=True),
+         Output('chat-history-tick', 'data', allow_duplicate=True)],
         [Input('chat-language-toggle-btn', 'n_clicks'),
          Input('pending-language-switch', 'data')],
         [State('chat-language', 'data'),
-         State('chat-language-preference', 'data')],
+         State('chat-language-preference', 'data'),
+         State('chat-session-id', 'data'),
+         State('chat-history-tick', 'data')],
         prevent_initial_call=True,
     )
-    def switch_language(toggle_clicks, pending_switch, current_language, preference):
+    def switch_language(toggle_clicks, pending_switch, current_language, preference, session_id, tick):
         trigger_id = dash.ctx.triggered_id
         current_language = current_language or 'en'
 
         if trigger_id == 'chat-language-toggle-btn':
             if not toggle_clicks:
-                return dash.no_update, dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             new_language = 'en' if current_language == 'es' else 'es'
         elif trigger_id == 'pending-language-switch':
             # Slash command (/spanish, /english). Payload is the target language.
             if not pending_switch:
-                return dash.no_update, dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             new_language = 'es' if pending_switch == 'es' else 'en'
             if new_language == current_language:
-                return dash.no_update, dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
         else:
-            return dash.no_update, dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
         # Persist the new choice only if the user opted to be remembered.
         preference_update = dash.no_update
         if preference and preference.get('language'):
             preference_update = {'language': new_language}
-        return new_language, preference_update
+
+        if not session_id:
+            messages = [_welcome_bubble(new_language)]
+        else:
+            history = get_history_for_display(session_id, new_language)
+            messages = (
+                _render_history_messages(history, new_language)
+                if history
+                else [_welcome_bubble(new_language)]
+            )
+
+        return new_language, preference_update, messages, (tick or 0) + 1
 
     @app.callback(
         Output('chat-messages', 'children', allow_duplicate=True),
@@ -1236,6 +1484,59 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
                     else f'Entendido, {name}. Recordaré tu nombre en este dispositivo.'
                 )
             return _bubble_reply(message)
+
+        # Name-on-first-chat, step 1: the first time a logged-in user sends a
+        # message and we have no name yet, ASK for their name (we don't treat this
+        # first message as the name — they might open with "hi"). Mark that we've
+        # asked so we only prompt once.
+        if user_id and not command.startswith('/') and not get_name_prompted(user_id):
+            set_name_prompted(user_id)
+            ask = (
+                '¡Hola! Antes de empezar, ¿cómo te gustaría que te llame?'
+                if language == 'es'
+                else 'Hi! Before we start, what should I call you?'
+            )
+            return (
+                [
+                    *(messages or []),
+                    _user_bubble(user_input, timestamp=datetime.utcnow().isoformat(),
+                                 language=language),
+                    _ai_bubble(ask, timestamp=datetime.utcnow().isoformat(),
+                               language=language),
+                ],
+                '', None, dash.no_update, dash.no_update, dash.no_update,
+                clear_confirm, '➤', None, dash.no_update,
+            )
+
+        # Name-on-first-chat, step 2: we asked last turn (name_prompted is set) but
+        # still have no name. If this message looks like a name, store it and greet.
+        if user_id and not command.startswith('/') and not get_user_name(user_id):
+            candidate = ' '.join(user_input.strip().split())
+            looks_like_name = (
+                0 < len(candidate) <= 40
+                and all(ch.isalpha() or ch in " .'-" for ch in candidate)
+            )
+            if looks_like_name:
+                name = candidate[:80]
+                set_user_name(user_id, name)
+                greeting = (
+                    f'¡Encantado, {name}! ¿En qué te puedo ayudar sobre el panel?'
+                    if language == 'es'
+                    else f'Nice to meet you, {name}! How can I help you with the dashboard?'
+                )
+                return (
+                    [
+                        *(messages or []),
+                        _user_bubble(user_input, timestamp=datetime.utcnow().isoformat(),
+                                     language=language),
+                        _ai_bubble(greeting, timestamp=datetime.utcnow().isoformat(),
+                                   language=language),
+                    ],
+                    '', None, dash.no_update, dash.no_update, dash.no_update,
+                    clear_confirm, '➤', None, dash.no_update,
+                )
+            # Not a name (they asked a real question instead) — fall through and
+            # answer it normally; get_user_name stays empty, no more prompting.
 
         messages = list(messages or [])
         messages.append(

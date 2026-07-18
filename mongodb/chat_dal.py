@@ -70,26 +70,56 @@ def init_chat_db() -> None:
 
 # ── users ───────────────────────────────────────────────────────────────────────
 
+def _user_query(user_id: str):
+    """Match a user by _id, accounting for auth accounts (ObjectId _id) vs. legacy
+    anonymous ids (plain string _id). A 24-hex user_id is an account ObjectId."""
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    try:
+        return {"_id": ObjectId(user_id)}
+    except (InvalidId, TypeError):
+        return {"_id": user_id}
+
+
 def ensure_user(user_id: str, email: str | None = None) -> None:
     if not user_id:
         return
-    users.update_one(
-        {"_id": user_id},
-        {"$setOnInsert": {"email": email, "name": None}},
-        upsert=True,
-    )
+    # Only create a shell for legacy string ids. Account ids (ObjectId) already
+    # exist via auth signup — never upsert a duplicate for them.
+    query = _user_query(user_id)
+    if isinstance(query["_id"], str):
+        users.update_one(
+            query,
+            {"$setOnInsert": {"email": email, "name": None}},
+            upsert=True,
+        )
 
 
 def set_user_name(user_id: str, name: str) -> None:
     ensure_user(user_id)
-    users.update_one({"_id": user_id}, {"$set": {"name": name}})
+    users.update_one(_user_query(user_id), {"$set": {"name": name}})
 
 
 def get_user_name(user_id: str | None) -> str | None:
     if not user_id:
         return None
-    doc = users.find_one({"_id": user_id}, {"name": 1})
+    doc = users.find_one(_user_query(user_id), {"name": 1})
     return doc.get("name") if doc else None
+
+
+def get_name_prompted(user_id: str | None) -> bool:
+    """Whether the bot has already asked this user for their name."""
+    if not user_id:
+        return False
+    doc = users.find_one(_user_query(user_id), {"name_prompted": 1})
+    return bool(doc.get("name_prompted")) if doc else False
+
+
+def set_name_prompted(user_id: str | None) -> None:
+    if not user_id:
+        return
+    users.update_one(_user_query(user_id), {"$set": {"name_prompted": True}})
 
 
 # ── sessions ────────────────────────────────────────────────────────────────────

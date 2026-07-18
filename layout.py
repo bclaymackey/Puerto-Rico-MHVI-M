@@ -5,12 +5,133 @@ from dash import dcc, html, dash_table
 
 def build_layout(global_categories: list, encoded_logo1: str, encoded_logo2: str) -> html.Div:
     return html.Div([
-        _header(encoded_logo1, encoded_logo2),
-        _top_bar(global_categories),
-        _main_content(global_categories),
-        _help_modal(),
-        _custom_reports_modal(global_categories),
+        # Resolves the auth cookie on load; drives the login gate below.
+        dcc.Store(id='chat-user-id'),
+        _build_login_page(),
+        # The whole app is hidden until authenticated; the gate reveals it.
+        html.Div(
+            id='app-body',
+            style={'display': 'none'},
+            children=[
+                _header(encoded_logo1, encoded_logo2),
+                _account_menu(),
+                _top_bar(global_categories),
+                _main_content(global_categories),
+                _help_modal(),
+                _custom_reports_modal(global_categories),
+            ],
+        ),
     ], style={'fontFamily': 'Arial'})
+
+
+_ACCOUNT_INPUT = {
+    'width': '100%', 'padding': '8px 10px', 'marginBottom': '8px',
+    'borderRadius': '8px', 'border': '1px solid #d7c9ea',
+    'fontSize': '12px', 'boxSizing': 'border-box',
+}
+_ACCOUNT_ACTION_BTN = {
+    'width': '100%', 'padding': '8px', 'borderRadius': '8px', 'border': 'none',
+    'background': '#4b0082', 'color': 'white', 'fontSize': '12px',
+    'fontWeight': '600', 'cursor': 'pointer',
+}
+
+_ACCOUNT_DISCLOSURE = {
+    'borderTop': '1px solid #eee7f5',
+    'padding': '2px 0',
+}
+_ACCOUNT_SUMMARY = {
+    'padding': '12px 2px', 'fontWeight': '700', 'fontSize': '12px',
+    'color': '#31104f', 'cursor': 'pointer', 'listStylePosition': 'inside',
+}
+
+
+def _account_menu() -> html.Div:
+    """Top-right settings menu with collapsible account actions and sign-out.
+    Visible whenever the app body is shown (i.e. when logged in)."""
+    return html.Div(
+        style={'position': 'fixed', 'top': '12px', 'right': '16px', 'zIndex': '900'},
+        children=[
+            html.Div(
+                html.Button(
+                    '⚙ Settings',
+                    id='account-menu-btn',
+                    n_clicks=0,
+                    **{'aria-label': 'Open account settings'},
+                    style={
+                        'padding': '7px 14px', 'borderRadius': '10px',
+                        'border': '1px solid #d7c9ea', 'background': 'white',
+                        'color': '#4b0082', 'fontSize': '12px', 'fontWeight': '600',
+                        'cursor': 'pointer', 'boxShadow': '0 2px 8px rgba(75,0,130,0.12)',
+                    },
+                ),
+                style={'display': 'flex', 'justifyContent': 'flex-end'},
+            ),
+            html.Div(
+                id='account-panel',
+                style={
+                    'display': 'none',  # toggled by the account-menu callback
+                    'position': 'absolute', 'top': '44px', 'right': '0',
+                    'width': '280px', 'padding': '16px',
+                    'background': 'white', 'borderRadius': '14px',
+                    'boxShadow': '0 16px 40px rgba(75, 0, 130, 0.20)',
+                    'border': '1px solid #eee',
+                },
+                children=[
+                    html.Div('Account', style={'fontWeight': '700', 'fontSize': '14px',
+                                               'color': '#31104f'}),
+                    html.Div(id='account-email',
+                             style={'fontSize': '12px', 'color': '#7a5aa6',
+                                    'margin': '2px 0 12px', 'wordBreak': 'break-all'}),
+
+                    html.Details(
+                        style=_ACCOUNT_DISCLOSURE,
+                        children=[
+                            html.Summary('Change password', style=_ACCOUNT_SUMMARY),
+                            html.Div([
+                                dcc.Input(id='account-current-pw', type='password',
+                                          placeholder='Current password', style=_ACCOUNT_INPUT),
+                                dcc.Input(id='account-new-pw', type='password',
+                                          placeholder='New password', style=_ACCOUNT_INPUT),
+                                html.Button('Update password', id='account-change-pw-btn',
+                                            n_clicks=0, style=_ACCOUNT_ACTION_BTN),
+                                html.Div(id='account-pw-msg',
+                                         style={'fontSize': '11px', 'minHeight': '14px',
+                                                'marginTop': '6px', 'color': '#7a5aa6'}),
+                            ], style={'padding': '0 2px 8px'}),
+                        ],
+                    ),
+                    html.Details(
+                        style=_ACCOUNT_DISCLOSURE,
+                        children=[
+                            html.Summary('Security question', style=_ACCOUNT_SUMMARY),
+                            html.Div([
+                                dcc.Input(id='account-secq', type='text',
+                                          placeholder='Question (e.g. First pet’s name?)',
+                                          style=_ACCOUNT_INPUT),
+                                dcc.Input(id='account-seca', type='text',
+                                          placeholder='Answer', style=_ACCOUNT_INPUT),
+                                html.Button('Save security question', id='account-secq-btn',
+                                            n_clicks=0, style=_ACCOUNT_ACTION_BTN),
+                                html.Div(id='account-secq-msg',
+                                         style={'fontSize': '11px', 'minHeight': '14px',
+                                                'marginTop': '6px', 'color': '#7a5aa6'}),
+                            ], style={'padding': '0 2px 8px'}),
+                        ],
+                    ),
+                    html.Button(
+                        'Sign out', id='sign-out-btn', n_clicks=0,
+                        style={
+                            'width': '100%', 'padding': '11px 2px',
+                            'marginTop': '2px', 'border': 'none',
+                            'borderTop': '1px solid #eee7f5', 'background': 'transparent',
+                            'color': '#4b0082', 'fontSize': '12px', 'fontWeight': '700',
+                            'textAlign': 'left', 'cursor': 'pointer',
+                        },
+                    ),
+                ],
+            ),
+        ],
+    )
 
 
 def _header(logo1_src: str, logo2_src: str) -> html.Div:
@@ -385,7 +506,8 @@ def _chat_widget() -> list:
             dcc.Store(id='chat-generating', data=None),
             dcc.Store(id='chat-cancelled', data=None),
             dcc.Store(id='chat-session-id', data=str(uuid.uuid4()), storage_type='memory'),
-            dcc.Store(id='chat-user-id', storage_type='local'),
+            # chat-user-id now lives at the top level (build_layout) since it drives
+            # the full-page login gate.
             dcc.Store(id='chat-history-tick', data=0),
             dcc.Store(id='chat-sessions-open', data=False),
             dcc.Store(id='chat-menu-open', data=False),
@@ -713,6 +835,165 @@ def _chat_widget() -> list:
     )
 
     return [chat_btn, chat_popup]
+
+
+_AUTH_INPUT_STYLE = {
+    'width': '100%', 'padding': '10px 12px', 'marginBottom': '10px',
+    'borderRadius': '10px', 'border': '1px solid #d7c9ea',
+    'fontSize': '13px', 'boxSizing': 'border-box',
+}
+_AUTH_BTN_STYLE = {
+    'width': '100%', 'padding': '10px', 'borderRadius': '10px', 'border': 'none',
+    'background': '#4b0082', 'color': 'white', 'fontSize': '14px',
+    'fontWeight': '600', 'cursor': 'pointer',
+}
+
+
+def _build_login_page() -> html.Div:
+    """Full-page login/signup gate. Covers the entire viewport until the user is
+    authenticated; the rest of the site (dashboard, map, chatbot) is hidden behind
+    it. This is the site's landing page for anonymous visitors.
+    """
+    return html.Div(
+        id='login-page',
+        style={
+            # Shown by default (logged out); a callback hides it once authenticated.
+            'position': 'fixed', 'inset': '0', 'zIndex': '1000',
+            'display': 'flex',
+            'background': 'linear-gradient(160deg, #f6edff 0%, #eee6fb 100%)',
+            'flexDirection': 'column', 'justifyContent': 'center',
+            'alignItems': 'center', 'padding': '24px',
+        },
+        children=[
+            html.Div(
+                style={
+                    'width': '100%', 'maxWidth': '340px', 'padding': '28px',
+                    'background': 'white', 'borderRadius': '16px',
+                    'boxShadow': '0 18px 48px rgba(75, 0, 130, 0.18)',
+                },
+                children=[
+                    html.Div(
+                        'Puerto Rico MHVI-M',
+                        style={
+                            'fontWeight': '700', 'fontSize': '18px',
+                            'color': '#31104f', 'marginBottom': '4px',
+                            'textAlign': 'center',
+                        },
+                    ),
+                    html.Div(
+                        'Sign in',
+                        id='auth-title',
+                        style={
+                            'fontWeight': '600', 'fontSize': '14px',
+                            'color': '#7a5aa6', 'marginBottom': '18px',
+                            'textAlign': 'center',
+                        },
+                    ),
+                    dcc.Input(
+                        id='auth-email', type='email', placeholder='Email',
+                        autoComplete='username', style=_AUTH_INPUT_STYLE,
+                    ),
+                    dcc.Input(
+                        id='auth-password', type='password', placeholder='Password',
+                        autoComplete='current-password', style=_AUTH_INPUT_STYLE,
+                    ),
+                    dcc.Input(
+                        id='auth-confirm', type='password',
+                        placeholder='Confirm password',
+                        autoComplete='new-password',
+                        style={**_AUTH_INPUT_STYLE, 'display': 'none'},  # signup only
+                    ),
+                    html.Div(
+                        id='auth-error',
+                        style={
+                            'color': 'crimson', 'fontSize': '12px',
+                            'minHeight': '16px', 'marginBottom': '8px',
+                        },
+                    ),
+                    html.Button('Log in', id='auth-submit-btn', n_clicks=0,
+                                style=_AUTH_BTN_STYLE),
+                    html.Div(
+                        [
+                            html.Span(id='auth-toggle-prompt',
+                                      children="No account? ",
+                                      style={'fontSize': '12px', 'color': '#555'}),
+                            html.Span(
+                                'Sign up', id='auth-toggle-link',
+                                n_clicks=0,
+                                style={
+                                    'fontSize': '12px', 'color': '#4b0082',
+                                    'fontWeight': '600', 'cursor': 'pointer',
+                                },
+                            ),
+                        ],
+                        style={'textAlign': 'center', 'marginTop': '12px'},
+                    ),
+                    html.Div(
+                        html.Span(
+                            'Forgot password?', id='forgot-link', n_clicks=0,
+                            style={'fontSize': '12px', 'color': '#7a5aa6',
+                                   'cursor': 'pointer', 'textDecoration': 'underline'},
+                        ),
+                        style={'textAlign': 'center', 'marginTop': '10px'},
+                    ),
+                    # 'login' or 'signup' — which mode the form is in.
+                    dcc.Store(id='auth-mode', data='login'),
+                ],
+            ),
+            _build_forgot_password_card(),
+        ],
+    )
+
+
+def _build_forgot_password_card() -> html.Div:
+    """Self-service reset card: enter email -> shows the account's security
+    question -> answer it + set a new password. Uses the security-answer reset
+    logic (no email needed). Hidden until 'Forgot password?' is clicked."""
+    return html.Div(
+        id='forgot-card',
+        style={
+            'display': 'none',  # toggled by the forgot-link callback
+            'width': '100%', 'maxWidth': '340px', 'padding': '28px',
+            'marginTop': '16px', 'background': 'white', 'borderRadius': '16px',
+            'boxShadow': '0 18px 48px rgba(75, 0, 130, 0.18)',
+        },
+        children=[
+            html.Div('Reset your password', style={'fontWeight': '700',
+                     'fontSize': '15px', 'color': '#31104f', 'marginBottom': '14px',
+                     'textAlign': 'center'}),
+            dcc.Input(id='forgot-email', type='email', placeholder='Your email',
+                      autoComplete='username', style=_AUTH_INPUT_STYLE),
+            html.Button('Find my security question', id='forgot-lookup-btn',
+                        n_clicks=0, style=_AUTH_BTN_STYLE),
+            # Revealed once a security question is found for the email.
+            html.Div(
+                id='forgot-step2',
+                style={'display': 'none', 'marginTop': '14px'},
+                children=[
+                    html.Div(id='forgot-question',
+                             style={'fontSize': '13px', 'fontWeight': '600',
+                                    'color': '#4b0082', 'marginBottom': '8px'}),
+                    dcc.Input(id='forgot-answer', type='text', placeholder='Your answer',
+                              style=_AUTH_INPUT_STYLE),
+                    dcc.Input(id='forgot-newpw', type='password',
+                              placeholder='New password', autoComplete='new-password',
+                              style=_AUTH_INPUT_STYLE),
+                    html.Button('Reset password', id='forgot-reset-btn', n_clicks=0,
+                                style=_AUTH_BTN_STYLE),
+                ],
+            ),
+            html.Div(id='forgot-msg',
+                     style={'fontSize': '12px', 'minHeight': '16px',
+                            'marginTop': '10px', 'color': '#7a5aa6',
+                            'textAlign': 'center'}),
+            html.Div(
+                html.Span('← Back to sign in', id='forgot-back', n_clicks=0,
+                          style={'fontSize': '12px', 'color': '#7a5aa6',
+                                 'cursor': 'pointer'}),
+                style={'textAlign': 'center', 'marginTop': '12px'},
+            ),
+        ],
+    )
 
 
 def _main_content(global_categories: list) -> html.Div:

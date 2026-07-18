@@ -38,13 +38,19 @@ _BILINGUAL_DIRECTIVE = (
     "First, echo the user's most recent message verbatim in the 'query' field "
     "(for logging), and provide that same user message translated into English "
     "in 'query_en' and into Spanish in 'query_es' (a faithful translation, "
-    "nothing added or removed). Then answer: put the SAME answer in 'en' "
-    "(English) and 'es' (Spanish) — identical content, no information added, "
-    "dropped, or reordered between them, with Markdown, numbers, and proper "
-    "nouns (municipality and indicator names) kept identical. Also return a "
-    "short 3–6 word title summarizing what THIS conversation is about, in "
-    "'title_en' (English) and 'title_es' (Spanish); the two titles must mean "
-    "the same thing."
+    "nothing added or removed). Then answer the SAME content twice, once per "
+    "language:\n"
+    "- 'en' MUST be written entirely in English.\n"
+    "- 'es' MUST be written entirely in Spanish (español). Never put English "
+    "text in the 'es' field — translate it fully, including short greetings and "
+    "one-line replies (e.g. 'Hello!' → '¡Hola!'). If you catch yourself writing "
+    "English in 'es', translate it before returning.\n"
+    "The two answers must carry identical content — nothing added, dropped, or "
+    "reordered — with Markdown, numbers, and proper nouns (municipality and "
+    "indicator names) kept identical. Also return a short 3–6 word title "
+    "summarizing what THIS conversation is about, in 'title_en' (English) and "
+    "'title_es' (Spanish, español); the two titles must mean the same thing and "
+    "each must be in its own language."
 )
 
 
@@ -64,10 +70,12 @@ def call_llm(
     bilingually with no extra call.
     """
     name_directive = (
-        f"The user's preferred name is {user_name}. Use it very sparingly — at "
-        "most an occasional greeting or a warm moment. Do NOT begin replies with "
-        "their name and do NOT repeat it in every message; like a normal "
-        "assistant, you usually answer without naming them at all."
+        f"The user's preferred name is {user_name}. When THIS is the first "
+        "assistant reply of the conversation (the history has no prior assistant "
+        "turn), greet them warmly by name, e.g. 'Hi {name}!' / '¡Hola, {name}!'. "
+        "After that opening greeting, use the name only sparingly (an occasional "
+        "warm moment); do not begin every later reply with their name or repeat "
+        "it in every message."
         if user_name
         else ""
     )

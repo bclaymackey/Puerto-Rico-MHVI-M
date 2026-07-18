@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 chat/chat.db
+archive/
 
 *.md
 !README.md

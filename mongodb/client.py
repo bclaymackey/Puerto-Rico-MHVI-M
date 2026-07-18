@@ -88,3 +88,10 @@ def init_chat_mongo() -> None:
     # cross-session retrieval candidate fetch (lexical_search).
     messages.create_index([("content", TEXT), ("content_en", TEXT), ("content_es", TEXT)])
     counters.update_one({"_id": "messages"}, {"$setOnInsert": {"seq": 0}}, upsert=True)
+
+    # Auth: unique email, session-token lookup, and a TTL index that auto-expires
+    # sessions. Imported here (not at module top) to avoid an import cycle —
+    # auth.db imports this module's `db`.
+    from auth.db import ensure_auth_indexes
+
+    ensure_auth_indexes()
