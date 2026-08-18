@@ -15,7 +15,6 @@ _CROSS_SESSION_MESSAGE_WINDOW = CROSS_SESSION_MESSAGE_WINDOW
 def build_llm_context(
     session_id: str,
     user_message: str,
-    max_turns: int = 30,
     language: str = "en",
 ) -> list[dict]:
     """Append the latest user message and return recent history for the LLM.

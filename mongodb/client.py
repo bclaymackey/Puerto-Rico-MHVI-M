@@ -95,3 +95,7 @@ def init_chat_mongo() -> None:
     from auth.db import ensure_auth_indexes
 
     ensure_auth_indexes()
+
+    from tickets.db import ensure_ticket_indexes
+
+    ensure_ticket_indexes()

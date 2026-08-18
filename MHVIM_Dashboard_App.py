@@ -6,6 +6,7 @@ from data import load_db_metadata, load_data_dictionary
 from layout import build_layout
 from callbacks import register_callbacks
 from auth.routes import register_auth_routes
+from tickets.routes import register_ticket_routes
 
 
 def encode_image(path):
@@ -60,6 +61,7 @@ app.layout = lambda: build_layout(
 
 register_callbacks(app, db_metadata, data_dictionary_df=data_dictionary_df)
 register_auth_routes(app.server)
+register_ticket_routes(app.server)
 
 if __name__ == '__main__':
     app.run(debug=True)

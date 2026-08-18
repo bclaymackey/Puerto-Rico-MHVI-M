@@ -52,7 +52,7 @@ def test_expired_session_does_not_resolve():
 
 
 def test_remember_me_extends_expiry():
-    short = create_session("user-a", remember=False)
-    long = create_session("user-b", remember=True)
+    create_session("user-a", remember=False)
+    create_session("user-b", remember=True)
     rows = {r["user_id"]: r for r in get_auth_sessions().find({})}
     assert rows["user-b"]["expires_at"] > rows["user-a"]["expires_at"]

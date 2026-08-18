@@ -1,16 +1,22 @@
 import os
 
 from dotenv import load_dotenv
+from ollama import ChatResponse, chat as ollama_chat
 from openai import OpenAI
 from pydantic import BaseModel
 
-from .hyperparameters import LLM_MODEL
+from .hyperparameters import LLM_MODEL, LLM_PROVIDER
 from .prompt import SYSTEM_PROMPT
+from .site_knowledge import SITE_KNOWLEDGE
 
 
 load_dotenv()
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = (
+    OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if LLM_PROVIDER == "openai"
+    else None
+)
 
 
 class BilingualReply(BaseModel):
@@ -30,6 +36,61 @@ class BilingualReply(BaseModel):
     es: str
     title_en: str
     title_es: str
+
+
+def _require_openai_client() -> OpenAI:
+    if openai_client is None:
+        raise RuntimeError("OpenAI client is unavailable when LLM_PROVIDER is not 'openai'")
+    return openai_client
+
+
+def _ollama_messages(instructions: str, input_data: str | list[dict]) -> list[dict]:
+    messages = [{"role": "system", "content": instructions}]
+    if isinstance(input_data, str):
+        messages.append({"role": "user", "content": input_data})
+    else:
+        messages.extend(input_data)
+    return messages
+
+
+def call_text_llm(instructions: str, input_data: str | list[dict]) -> str:
+    """Return plain text from the configured provider."""
+    if LLM_PROVIDER == "ollama":
+        response: ChatResponse = ollama_chat(
+            model=LLM_MODEL,
+            messages=_ollama_messages(instructions, input_data),
+        )
+        return (response.message.content or "").strip()
+
+    response = _require_openai_client().responses.create(
+        model=LLM_MODEL,
+        instructions=instructions,
+        input=input_data,
+    )
+    return (response.output_text or "").strip()
+
+
+def _call_bilingual_llm(
+    instructions: str, chat_history_context: list[dict]
+) -> BilingualReply:
+    if LLM_PROVIDER == "ollama":
+        response: ChatResponse = ollama_chat(
+            model=LLM_MODEL,
+            messages=_ollama_messages(instructions, chat_history_context),
+            format=BilingualReply.model_json_schema(),
+        )
+        content = response.message.content or ""
+        return BilingualReply.model_validate_json(content)
+
+    response = _require_openai_client().responses.parse(
+        model=LLM_MODEL,
+        instructions=instructions,
+        input=chat_history_context,
+        text_format=BilingualReply,
+    )
+    if response.output_parsed is None:
+        raise ValueError("no parsed output")
+    return response.output_parsed
 
 
 # The answer and a short session title are produced in both languages in one
@@ -108,6 +169,10 @@ def call_llm(
     )
     instructions = (
         f"{SYSTEM_PROMPT}\n\n"
+        "Site knowledge (ground truth for every UI feature, button, and menu "
+        "in this app — never invent a button, menu, or step not listed here; "
+        "if something isn't listed, say it isn't available rather than "
+        f"guessing):\n{SITE_KNOWLEDGE}\n\n"
         f"{_BILINGUAL_DIRECTIVE}\n\n"
         f"{name_directive}\n\n"
         f"{summary_directive}\n\n"
@@ -121,15 +186,7 @@ def call_llm(
         print("[call_llm data_context]", data_context or "<empty>")
         print("[call_llm summary_context]", summary_context or "<empty>")
         print("[call_llm memory_context]", memory_context or "<empty>")
-        response = openai_client.responses.parse(
-            model=LLM_MODEL,
-            instructions=instructions,
-            input=chat_history_context,
-            text_format=BilingualReply,
-        )
-        reply = response.output_parsed
-        if reply is None:
-            raise ValueError("no parsed output")
+        reply = _call_bilingual_llm(instructions, chat_history_context)
         # Print the raw structured response to the console the moment it returns.
         print("[call_llm raw response]", reply.model_dump_json(indent=2))
         return {

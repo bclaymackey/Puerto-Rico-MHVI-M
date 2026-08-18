@@ -21,3 +21,36 @@
     color: #c3b3d6;
     cursor: not-allowed;
 }
+
+/* Download overlay and button states */
+.download-overlay {
+    display: none;
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    align-items: center; justify-content: center;
+    background-color: rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-radius: 10px;
+    z-index: 3000;
+}
+
+.download-overlay.visible {
+    display: flex;
+}
+
+.download-overlay > div {
+    background: white;
+    padding: 14px 26px;
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+    font-weight: 700;
+    font-size: 15px;
+    color: #2f2540;
+}
+
+.downloaded-btn {
+    background-color: #2e7d32 !important;
+    border-color: #2e7d32 !important;
+    color: white !important;
+}

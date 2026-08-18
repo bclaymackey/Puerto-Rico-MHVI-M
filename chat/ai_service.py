@@ -15,7 +15,12 @@ from .chat_history_manager import (
 )
 from .data_context_builder import find_all_municipalities
 from .llm_caller import call_llm
-from .navigation_guide import build_navigation_response, is_navigation_intent
+from .navigation_guide import (
+    build_custom_report_response,
+    build_navigation_response,
+    is_custom_report_intent,
+    is_navigation_intent,
+)
 from .prompt_context import build_prompt_context
 from .report_data_builder import get_report_data
 from .report_generator import generate_report_text
@@ -50,7 +55,8 @@ _REPORT_KEYWORDS_ES = [
 ]
 
 
-# Server-side, single-process cache. Single-use: consume_report pops.
+# Server-side, single-process cache. Re-readable: consume_report only pops
+# when a new report replaces it (see _generate_report_response's overwrite).
 # Acceptable for single-worker Dash dev; for multi-worker prod, swap for Redis.
 _REPORT_CACHE: dict = {}
 
@@ -65,10 +71,31 @@ def _is_report_intent(text_lower: str, language: str) -> bool:
     return False
 
 
-def _ack_message(municipality: str, language: str) -> str:
+def _ack_message(municipality: str, language: str, report_data: dict) -> str:
+    """Ready-message plus the raw scores the PDF was built from, so the data
+    behind the report is visible in chat and not only inside the download.
+    """
+    overall = report_data.get("overall_score")
+    categories = report_data.get("categories") or {}
+
     if language == "es":
-        return f"Tu informe de {municipality} está listo."
-    return f"Your {municipality} report is ready."
+        lines = [f"Tu informe de {municipality} está listo. Datos utilizados:"]
+        overall_label = "General"
+    else:
+        lines = [f"Your {municipality} report is ready. Data used:"]
+        overall_label = "Overall"
+
+    if overall is not None:
+        lines.append(f"• {overall_label}: {overall}")
+    for name, value in categories.items():
+        lines.append(f"• {name}: {value}")
+
+    if language == "es":
+        lines.append("También puedes explorar cada categoría en el mapa usando el menú Categoría.")
+    else:
+        lines.append("You can also explore each category on the map using the Category dropdown.")
+
+    return "\n".join(lines)
 
 
 def _need_municipality_message(language: str) -> str:
@@ -130,7 +157,7 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
     filename = f"{_safe_filename_stem(municipality)}_vulnerability_report_{timestamp}.pdf"
     _REPORT_CACHE[token] = (pdf_bytes, filename)
 
-    ack = _ack_message(municipality, language)
+    ack = _ack_message(municipality, language, report_data)
     save_ai_response(session_id, ack, language)
     return {
         "kind": "report",
@@ -142,8 +169,13 @@ def _generate_report_response(user_input: str, language: str, session_id: str) -
 
 
 def consume_report(token: str):
-    """Pop and return (pdf_bytes, filename) for a token, or None if missing."""
-    return _REPORT_CACHE.pop(token, None)
+    """Return (pdf_bytes, filename) for a token, or None if missing.
+
+    Does not evict the entry — the report button allows repeated downloads
+    (with a confirmation) of the same pinned report, per v1's "one
+    outstanding report at a time" design.
+    """
+    return _REPORT_CACHE.get(token)
 
 
 def process_chat_message(
@@ -164,16 +196,29 @@ def process_chat_message(
 
     text_lower = (user_input or "").lower()
 
+    if is_custom_report_intent(text_lower, language):
+        # Checked before _is_report_intent: "custom report" would otherwise
+        # be swallowed by the bare "report" keyword and misrouted into the
+        # single-municipality PDF flow below.
+        steps = build_custom_report_response(language)
+        build_llm_context(session_id, user_input, language=language)
+        save_ai_response(session_id, steps, language)
+        return {"kind": "text", "text": steps}
+
     if _is_report_intent(text_lower, language):
         # Record the user message in history so the report flow shows up there.
         build_llm_context(session_id, user_input, language=language)
         return _generate_report_response(user_input, language, session_id)
 
     if is_navigation_intent(text_lower, language):
-        build_llm_context(session_id, user_input, language=language)
         steps = build_navigation_response(user_input, language)
-        save_ai_response(session_id, steps, language)
-        return {"kind": "text", "text": steps}
+        if steps is not None:
+            build_llm_context(session_id, user_input, language=language)
+            save_ai_response(session_id, steps, language)
+            return {"kind": "text", "text": steps}
+        # No confident navigation match (e.g. an unrelated "how do I..."
+        # question) — fall through to the normal LLM turn below, which
+        # applies the system prompt's scope-control / redirect rules.
 
     ctx = build_prompt_context(session_id, user_id, user_input, language)
     reply = call_llm(

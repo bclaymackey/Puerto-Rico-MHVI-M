@@ -6,7 +6,6 @@ from dash import Input, Output, State, dcc, html, ALL, MATCH, dash_table
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-import numpy as np
 from chat import (
     build_pdf_bytes,
     consume_report,
@@ -561,6 +560,28 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         """,
         Output('chat-menu-btn', 'title'),
         Input('chat-menu-btn', 'id'),
+    )
+
+    # Show the transient "Downloaded!" overlay (blurred over the chat window)
+    # after a chat PDF download. Report downloads use the button label +
+    # re-download confirmation modal instead — see export_report_pdf below.
+    app.clientside_callback(
+        """
+        function(chatState) {
+            if (!chatState || !chatState.downloaded) {
+                return window.dash_clientside.no_update;
+            }
+            var el = document.getElementById('download-overlay');
+            if (el) {
+                el.classList.add('visible');
+                setTimeout(function () { el.classList.remove('visible'); }, 2200);
+            }
+            return chatState.label || 'Downloaded!';
+        }
+        """,
+        Output('download-overlay-text', 'children'),
+        Input('chat-download-state', 'data'),
+        prevent_initial_call=True,
     )
 
     def _format_message_timestamp(timestamp_value):
@@ -1644,42 +1665,74 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         # Reply is ready — restore the arrow and clear the generating flag.
         return messages, (tick or 0) + 1, pending_report_update, '➤', None
 
+    # Chat PDF always re-downloads on click; success is shown via the
+    # blurred "Downloaded!" overlay (see clientside_callback above), not a
+    # re-download confirmation.
     @app.callback(
-        Output('download-pdf', 'data'),
+        [Output('download-pdf', 'data'), Output('chat-download-state', 'data')],
         Input('download-pdf-btn', 'n_clicks'),
-        State('chat-session-id', 'data'),
-        State('chat-language', 'data'),
-        prevent_initial_call=True
+        [State('chat-session-id', 'data'), State('chat-language', 'data')],
+        prevent_initial_call=True,
     )
     def export_chat_pdf(n_clicks, session_id, language):
         if not n_clicks or not session_id:
-            return dash.no_update
+            return dash.no_update, dash.no_update
 
         history = get_history_for_display(session_id, language or 'en')
         if not history:
-            return dash.no_update
+            return dash.no_update, dash.no_update
 
         pdf_bytes = build_pdf_bytes(history, language=language or 'en')
-
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
         filename = f'chat_transcript_{timestamp}.pdf'
 
-        return dcc.send_bytes(pdf_bytes, filename=filename)
+        overlay_label = '¡Descargado!' if language == 'es' else 'Downloaded!'
+        new_state = {'downloaded': True, 'ts': timestamp, 'label': overlay_label}
+        return dcc.send_bytes(lambda f: f.write(pdf_bytes), filename=filename), new_state
 
+    # Report PDF: first click downloads and flips the button to "Downloaded"
+    # (see update_report_download_button below). Clicking again asks for
+    # confirmation via download-confirm-modal before re-downloading.
     @app.callback(
-        Output('download-report', 'data'),
+        [
+            Output('download-report', 'data', allow_duplicate=True),
+            Output('report-download-state', 'data', allow_duplicate=True),
+            Output('download-confirm-modal', 'style', allow_duplicate=True),
+        ],
         Input('download-report-btn', 'n_clicks'),
-        State('pending-report', 'data'),
+        [State('pending-report', 'data'), State('report-download-state', 'data')],
         prevent_initial_call=True,
     )
-    def export_report_pdf(n_clicks, pending):
+    def export_report_pdf(n_clicks, pending, report_state):
         if not n_clicks or not pending or not pending.get('token'):
-            return dash.no_update
-        result = consume_report(pending['token'])
+            return dash.no_update, dash.no_update, dash.no_update
+
+        token = pending['token']
+        # report-download-state is keyed by token so a *new* report always
+        # starts as "not yet downloaded", even if a previous report was.
+        state_for_token = report_state if (report_state and report_state.get('token') == token) else {}
+
+        # download-report-btn lives inside chat-messages.children, which several
+        # other callbacks wholesale-replace on every chat turn (typing indicator,
+        # then the reply). Dash re-fires this Input with the button's *current*
+        # n_clicks each time that happens, even though nothing was actually
+        # clicked — so only react once per genuinely new n_clicks value.
+        handled_clicks = state_for_token.get('clicks_handled', 0)
+        if n_clicks <= handled_clicks:
+            return dash.no_update, dash.no_update, dash.no_update
+
+        if state_for_token.get('downloaded'):
+            new_state = dict(state_for_token, clicks_handled=n_clicks)
+            return dash.no_update, new_state, {'display': 'block'}
+
+        result = consume_report(token)
         if result is None:
-            return dash.no_update
+            new_state = dict(state_for_token, clicks_handled=n_clicks)
+            return dash.no_update, new_state, dash.no_update
         pdf_bytes, filename = result
-        return dcc.send_bytes(pdf_bytes, filename=filename)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+        new_state = {'downloaded': True, 'token': token, 'clicks_handled': n_clicks, 'ts': timestamp}
+        return dcc.send_bytes(lambda f: f.write(pdf_bytes), filename=filename), new_state, dash.no_update
 
     @app.callback(
         Output('download-pdf-btn', 'disabled'),
@@ -1693,6 +1746,55 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         if not history:
             return True
         return not any(m.get('role') == 'assistant' for m in history)
+
+    @app.callback(
+        [Output('download-report-btn', 'children'), Output('download-report-btn', 'className')],
+        [Input('report-download-state', 'data'), Input('chat-language', 'data'), Input('pending-report', 'data')],
+        prevent_initial_call='initial_duplicate',
+    )
+    def update_report_download_button(report_state, language, pending):
+        # download-report-btn only exists in the DOM once a report bubble has
+        # been rendered in the current session; updating it while absent
+        # throws a "nonexistent object" error in dash-renderer.
+        if not (pending and pending.get('token')):
+            return dash.no_update, dash.no_update
+
+        downloaded = bool(
+            (report_state or {}).get('downloaded')
+            and (report_state or {}).get('token') == pending.get('token')
+        )
+        if language == 'es':
+            label = '¡Descargado!' if downloaded else 'Descargar informe'
+        else:
+            label = 'Downloaded!' if downloaded else 'Download report'
+        return label, ('downloaded-btn' if downloaded else '')
+
+    # Confirm modal handlers (report re-downloads only): Yes -> download again; No -> hide modal
+    @app.callback(
+        [Output('download-report', 'data', allow_duplicate=True),
+         Output('download-confirm-modal', 'style', allow_duplicate=True),
+         Output('report-download-state', 'data', allow_duplicate=True)],
+        [Input('download-confirm-yes', 'n_clicks'), Input('download-confirm-no', 'n_clicks')],
+        [State('pending-report', 'data'), State('report-download-state', 'data')],
+        prevent_initial_call=True,
+    )
+    def handle_download_confirm(yes_clicks, no_clicks, pending, report_state):
+        trigger = dash.ctx.triggered_id
+        if trigger == 'download-confirm-no':
+            return dash.no_update, {'display': 'none'}, dash.no_update
+
+        if not pending or not pending.get('token'):
+            return dash.no_update, {'display': 'none'}, dash.no_update
+
+        result = consume_report(pending['token'])
+        if result is None:
+            return dash.no_update, {'display': 'none'}, dash.no_update
+        pdf_bytes, filename = result
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+        # Preserve clicks_handled from report-download-state so the replay
+        # guard in export_report_pdf stays consistent after this re-download.
+        new_report_state = dict(report_state or {}, downloaded=True, token=pending['token'], ts=timestamp)
+        return dcc.send_bytes(lambda f: f.write(pdf_bytes), filename=filename), {'display': 'none'}, new_report_state
 
     @app.callback(
         [Output('chat-header-label', 'children'),
@@ -1717,9 +1819,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
             return (
                 'Asistente de IA',
                 fit_label,
-                '⬇ Descargar PDF',
+                '⬇ Descargar Chat PDF',
                 'Asistente de IA',
-                '🗂️ ' + ('Ocultar chats' if sessions_open else 'Chats'),
+                '🗂️ ' + ('Ocultar historial' if sessions_open else 'Historial de chats'),
                 '＋ Nuevo chat',
                 'Tus chats',
                 'Buscar conversaciones...',
@@ -1733,9 +1835,9 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         return (
             'AI Assistant',
             fit_label,
-            '⬇ Download PDF',
+            '⬇ Download Chat PDF',
             'AI Assistant',
-            '🗂️ ' + ('Hide Chats' if sessions_open else 'Chats'),
+            '🗂️ ' + ('Hide Chat History' if sessions_open else 'Chat History'),
             '＋ New Chat',
             'Your chats',
             'Search conversations...',
@@ -2324,3 +2426,45 @@ def register_callbacks(app: dash.Dash, db_metadata: dict, data_dictionary_df=Non
         Output('export-report-pdf-btn', 'n_clicks_timestamp'),
         Input('export-report-pdf-btn', 'n_clicks'),
     )
+
+    # ----- Ticket modal -----
+    @app.callback(
+        [Output('ticket-modal', 'style'),
+         Output('ticket-msg', 'children', allow_duplicate=True),
+         Output('ticket-category', 'value', allow_duplicate=True),
+         Output('ticket-subject', 'value', allow_duplicate=True),
+         Output('ticket-message', 'value', allow_duplicate=True)],
+        [Input('open-ticket-btn', 'n_clicks'),
+         Input('ticket-modal-close', 'n_clicks')],
+        prevent_initial_call=True,
+    )
+    def toggle_ticket_modal(open_clicks, close_clicks):
+        trigger = dash.ctx.triggered_id
+        if trigger == 'open-ticket-btn':
+            return {'display': 'block'}, '', None, '', ''
+        return {'display': 'none'}, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+    @app.callback(
+        [Output('ticket-msg', 'children'),
+         Output('ticket-category', 'value'),
+         Output('ticket-subject', 'value'),
+         Output('ticket-message', 'value')],
+        Input('ticket-submit-btn', 'n_clicks'),
+        [State('chat-user-id', 'data'),
+         State('ticket-category', 'value'),
+         State('ticket-subject', 'value'),
+         State('ticket-message', 'value')],
+        prevent_initial_call=True,
+    )
+    def submit_ticket(n_clicks, user_id, category, subject, message):
+        if not n_clicks:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        if not user_id:
+            return 'Please log in again.', dash.no_update, dash.no_update, dash.no_update
+        from tickets.core import create_ticket
+        user = get_public_user(user_id)
+        email = user['email'] if user else ''
+        _, err = create_ticket(user_id, email, category, subject, message)
+        if err:
+            return err, dash.no_update, dash.no_update, dash.no_update
+        return '✅ Ticket submitted — thank you!', None, '', ''

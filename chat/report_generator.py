@@ -1,7 +1,6 @@
 import json
 
-from .hyperparameters import LLM_MODEL
-from .llm_caller import openai_client
+from .llm_caller import call_text_llm
 
 
 _SYSTEM_PROMPT_EN = """You are a public-health analyst writing a Municipality Vulnerability Report for the Puerto Rico Mental Health Vulnerability Index (MHVI-M).
@@ -70,7 +69,7 @@ def _fallback_markdown(report_data: dict, language: str) -> str:
 
     if language == "es":
         lines = [
-            f"## Resumen del Municipio",
+            "## Resumen del Municipio",
             f"Informe de vulnerabilidad para {municipality}.",
             "",
             "## Resumen General de Vulnerabilidad",
@@ -81,7 +80,7 @@ def _fallback_markdown(report_data: dict, language: str) -> str:
         ]
     else:
         lines = [
-            f"## Municipality Overview",
+            "## Municipality Overview",
             f"Vulnerability report for {municipality}.",
             "",
             "## Overall Vulnerability Summary",
@@ -134,12 +133,7 @@ def generate_report_text(report_data: dict, language: str = "en") -> str:
     )
 
     try:
-        response = openai_client.responses.create(
-            model=LLM_MODEL,
-            instructions=instructions,
-            input=input_text,
-        )
-        text = (response.output_text or "").strip()
+        text = call_text_llm(instructions, input_text)
         if not text:
             return _fallback_markdown(report_data, language)
         return text

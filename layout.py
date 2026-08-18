@@ -2,6 +2,8 @@ import uuid
 
 from dash import dcc, html, dash_table
 
+from tickets.core import CATEGORIES as _TICKET_CATEGORIES
+
 
 def build_layout(global_categories: list, encoded_logo1: str, encoded_logo2: str) -> html.Div:
     return html.Div([
@@ -18,8 +20,38 @@ def build_layout(global_categories: list, encoded_logo1: str, encoded_logo2: str
                 _top_bar(global_categories),
                 _main_content(global_categories),
                 _help_modal(),
+                _ticket_modal(),
                 _custom_reports_modal(global_categories),
             ],
+        ),
+        # confirmation modal for repeated report downloads
+        html.Div(
+            id='download-confirm-modal',
+            style={'display': 'none'},
+            children=[
+                html.Div(
+                    style={'position': 'fixed', 'top': '0', 'left': '0', 'width': '100vw', 'height': '100vh',
+                           'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': '4000'},
+                    children=[
+                        html.Div(
+                            style={'position': 'absolute', 'top': '50%', 'left': '50%',
+                                   'transform': 'translate(-50%, -50%)', 'backgroundColor': 'white',
+                                   'padding': '20px', 'borderRadius': '8px', 'width': 'min(90vw, 420px)',
+                                   'boxShadow': '0 8px 30px rgba(0,0,0,0.2)'},
+                            children=[
+                                html.Div('Download report again?', style={'fontWeight': '700', 'marginBottom': '12px'}),
+                                html.Div('Are you sure you would like to download this report again?', style={'marginBottom': '16px'}),
+                                html.Div([
+                                    html.Button('Yes', id='download-confirm-yes', n_clicks=0,
+                                                style={'marginRight': '8px', 'padding': '8px 12px', 'background': '#4b0082', 'color': 'white', 'border': 'none', 'borderRadius': '6px'}),
+                                    html.Button('No', id='download-confirm-no', n_clicks=0,
+                                                style={'padding': '8px 12px', 'background': '#eee', 'border': 'none', 'borderRadius': '6px'}),
+                                ], style={'display': 'flex', 'justifyContent': 'flex-end'})
+                            ]
+                        )
+                    ]
+                )
+            ]
         ),
     ], style={'fontFamily': 'Arial'})
 
@@ -117,6 +149,18 @@ def _account_menu() -> html.Div:
                                                 'marginTop': '6px', 'color': '#7a5aa6'}),
                             ], style={'padding': '0 2px 8px'}),
                         ],
+                    ),
+                    html.Button(
+                        '🛟 Report an issue',
+                        id='open-ticket-btn',
+                        n_clicks=0,
+                        style={
+                            'width': '100%', 'padding': '11px 2px',
+                            'marginTop': '2px', 'border': 'none',
+                            'borderTop': '1px solid #eee7f5', 'background': 'transparent',
+                            'color': '#4b0082', 'fontSize': '12px', 'fontWeight': '700',
+                            'textAlign': 'left', 'cursor': 'pointer',
+                        },
                     ),
                     html.Button(
                         'Sign out', id='sign-out-btn', n_clicks=0,
@@ -365,6 +409,77 @@ def _help_modal() -> html.Div:
     )
 
 
+def _ticket_modal() -> html.Div:
+    """Overlay modal for submitting a support ticket. Hidden until opened."""
+    cat_options = [{'label': c, 'value': c} for c in _TICKET_CATEGORIES]
+    return html.Div(
+        id='ticket-modal',
+        style={'display': 'none'},
+        children=[
+            html.Div(
+                style={
+                    'position': 'fixed', 'top': '0', 'left': '0',
+                    'width': '100vw', 'height': '100vh',
+                    'backgroundColor': 'rgba(0,0,0,0.4)', 'zIndex': '2000',
+                },
+                children=[
+                    html.Div(
+                        style={
+                            'position': 'absolute', 'top': '50%', 'left': '50%',
+                            'transform': 'translate(-50%, -50%)',
+                            'width': 'min(90vw, 480px)',
+                            'backgroundColor': 'white', 'borderRadius': '10px',
+                            'padding': '24px',
+                            'boxShadow': '0 8px 30px rgba(0,0,0,0.2)',
+                        },
+                        children=[
+                            html.Div([
+                                html.Div('Report an issue',
+                                         style={'fontWeight': '700', 'fontSize': '16px',
+                                                'color': '#31104f'}),
+                                html.Button('✖', id='ticket-modal-close', n_clicks=0,
+                                            style={'border': 'none', 'background': 'transparent',
+                                                   'fontSize': '18px', 'cursor': 'pointer'}),
+                            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                                      'alignItems': 'center', 'marginBottom': '16px'}),
+                            dcc.Dropdown(
+                                id='ticket-category',
+                                options=cat_options,
+                                placeholder='Category',
+                                clearable=False,
+                                style={'marginBottom': '10px', 'fontSize': '13px'},
+                            ),
+                            dcc.Input(
+                                id='ticket-subject',
+                                type='text',
+                                placeholder='Subject',
+                                maxLength=120,
+                                style=_AUTH_INPUT_STYLE,
+                            ),
+                            dcc.Textarea(
+                                id='ticket-message',
+                                placeholder='Describe the issue…',
+                                maxLength=2000,
+                                style={**_AUTH_INPUT_STYLE,
+                                       'height': '120px', 'resize': 'vertical'},
+                            ),
+                            html.Button(
+                                'Submit',
+                                id='ticket-submit-btn',
+                                n_clicks=0,
+                                style=_AUTH_BTN_STYLE,
+                            ),
+                            html.Div(id='ticket-msg',
+                                     style={'fontSize': '12px', 'minHeight': '16px',
+                                            'marginTop': '8px', 'color': '#7a5aa6'}),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def _custom_reports_modal(global_categories: list) -> html.Div:
     return html.Div(
         id='custom-reports-modal',
@@ -517,6 +632,14 @@ def _chat_widget() -> list:
             dcc.Download(id='download-report'),
             dcc.Store(id='pending-report'),
             html.Div(id='chat-scroll-anchor', style={'display': 'none'}),
+            # Transient "Downloaded!" confirmation, blurred over the chat window itself.
+            html.Div(
+                id='download-overlay',
+                className='download-overlay',
+                children=[
+                    html.Div('Downloaded!', id='download-overlay-text'),
+                ],
+            ),
             html.Div(
                 id='language-selection',
                 style={
@@ -585,6 +708,8 @@ def _chat_widget() -> list:
                     'flexDirection': 'column', 'minHeight': '0'
                 },
                 children=[
+                    dcc.Store(id='chat-download-state', data={'downloaded': False}),
+                    dcc.Store(id='report-download-state', data={'downloaded': False}),
                     html.Div(
                         [
                             html.Span(
@@ -642,7 +767,7 @@ def _chat_widget() -> list:
                                                 style=_CHAT_MENU_ITEM_STYLE,
                                             ),
                                             html.Button(
-                                                ['🗂️ Chats'],
+                                                ['Chat History'],
                                                 id='chat-sessions-btn',
                                                 className='chat-menu-item',
                                                 n_clicks=0,
@@ -663,7 +788,7 @@ def _chat_widget() -> list:
                                                 style={**_CHAT_MENU_ITEM_STYLE, 'borderTop': '1px solid #f0eaf6'},
                                             ),
                                             html.Button(
-                                                ['⬇ Download PDF'],
+                                                ['Download Chat PDF'],
                                                 id='download-pdf-btn',
                                                 className='chat-menu-item',
                                                 disabled=True,

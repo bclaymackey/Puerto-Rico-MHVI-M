@@ -21,7 +21,7 @@ def _seed_anonymous(db, n_users=3, sessions_per_user=2, msgs_per_session=2):
         for s in range(sessions_per_user):
             sid = f"sess-{u}-{s}"
             db.sessions.insert_one({"_id": sid, "user_id": uid})
-            for m in range(msgs_per_session):
+            for _ in range(msgs_per_session):
                 db.messages.insert_one({"session_id": sid, "role": "user", "content": "hi"})
 
 

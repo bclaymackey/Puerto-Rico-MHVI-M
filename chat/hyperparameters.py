@@ -7,8 +7,21 @@ live here (windows, limits, model, the context-token budget). Pure cosmetics
 Token note: we estimate ~4 characters per token (good enough for budgeting).
 """
 
+import os
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 # ── Model ────────────────────────────────────────────────────────────────────
-LLM_MODEL = "gpt-5-nano"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+if LLM_PROVIDER not in {"ollama", "openai"}:
+    raise ValueError("LLM_PROVIDER must be either 'ollama' or 'openai'")
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
+LLM_MODEL = OLLAMA_MODEL if LLM_PROVIDER == "ollama" else OPENAI_MODEL
 
 # ── Layer 2: current-session history ─────────────────────────────────────────
 # Most recent messages (user+assistant) sent to the LLM each turn.
@@ -37,8 +50,8 @@ CARRY_OVER_SCAN_LIMIT = 12         # recent msgs scanned to recover named region
 RANKING_TOP_N = 5
 
 # ── Context token budget ─────────────────────────────────────────────────────
-# Hard ceiling on the whole assembled prompt. gpt-5-nano allows far more; this
-# is a hygiene cap so old memory can't crowd out the current data.
+# Hard ceiling on the whole assembled prompt. This is a hygiene cap so old
+# memory cannot crowd out the current data.
 MAX_CONTEXT_TOKENS = 100_000
 CHARS_PER_TOKEN = 4
 

@@ -5,11 +5,10 @@ translation happens per turn. This helper is used only for the *lazy* backfill:
 the first time a session is viewed in a language a row wasn't written in (the
 user's typed message, a short templated reply, a renamed title, or a legacy
 row), the missing side is translated once and cached in the DB. Reuses the same
-OpenAI client and model as the rest of the chat stack.
+configured provider and model as the rest of the chat stack.
 """
 
-from .hyperparameters import LLM_MODEL
-from .llm_caller import openai_client
+from .llm_caller import call_text_llm
 
 
 _LANG_NAME = {"en": "English", "es": "Spanish"}
@@ -33,12 +32,10 @@ def translate_text(text: str | None, target_lang: str) -> str:
         return text or ""
     target = _LANG_NAME.get(target_lang, "English")
     try:
-        response = openai_client.responses.create(
-            model=LLM_MODEL,
-            instructions=_SYSTEM_PROMPT.format(target=target),
-            input=text,
+        translated = call_text_llm(
+            _SYSTEM_PROMPT.format(target=target),
+            text,
         )
-        translated = (response.output_text or "").strip()
         return translated or text
     except Exception as e:  # noqa: BLE001 - never block a read on translation
         print(f"[translate_text] error: {e}")

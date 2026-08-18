@@ -2,18 +2,17 @@
 
 Keeps a short running summary of the conversation so long threads stay coherent
 without resending the full history every turn. Gated: only summarizes once a few
-new messages have accumulated, so it adds roughly one cheap LLM call per several
-turns — not per turn. Reuses the existing OpenAI client (no new dependency).
+new messages have accumulated, so it adds roughly one LLM call per several
+turns — not per turn. Reuses the configured provider and model.
 """
 
 from mongodb import chat_dal
 from .chat_db import get_session_summary, update_session_summary
 from .hyperparameters import (
-    LLM_MODEL,
     SUMMARY_TRIGGER_MESSAGES as _SUMMARY_TRIGGER_MESSAGES,
     SUMMARY_WORD_LIMIT as _SUMMARY_WORD_LIMIT,
 )
-from .llm_caller import openai_client
+from .llm_caller import call_text_llm
 
 _SUMMARY_INSTRUCTIONS = (
     "You maintain a running summary of a chat between a user and an assistant in "
@@ -49,12 +48,7 @@ def maybe_update_summary(session_id: str) -> None:
     )
 
     try:
-        response = openai_client.responses.create(
-            model=LLM_MODEL,
-            instructions=_SUMMARY_INSTRUCTIONS,
-            input=user_input,
-        )
-        summary = (response.output_text or "").strip()
+        summary = call_text_llm(_SUMMARY_INSTRUCTIONS, user_input)
     except Exception as e:
         print(f"[maybe_update_summary] error: {e}")
         return

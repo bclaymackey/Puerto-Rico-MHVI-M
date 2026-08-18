@@ -18,7 +18,7 @@ Documents (see mongodb.client):
 import re
 from datetime import datetime
 
-from .client import counters, messages, next_message_id, sessions, users
+from .client import messages, next_message_id, sessions, users
 
 _EMPTY_CHAT_TITLE = "Empty chat"
 _SESSION_TITLE_LIMIT = 80
@@ -246,7 +246,6 @@ def list_user_sessions(user_id: str | None, language: str = "en") -> list[dict]:
     if not user_id:
         return []
     suffix = _suffix(language)
-    content_col = f"content_{suffix}"
     # LEFT JOIN + GROUP BY + HAVING count>0 + first-user-message subquery, as an
     # aggregation pipeline. Sort mirrors: updated_at desc, then created_at desc.
     pipeline = [

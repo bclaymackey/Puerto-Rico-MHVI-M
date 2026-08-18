@@ -6,6 +6,7 @@ __pycache__/
 .ipynb_checkpoints/
 chat/chat.db
 archive/
+.DS_Store
 
 *.md
 !README.md

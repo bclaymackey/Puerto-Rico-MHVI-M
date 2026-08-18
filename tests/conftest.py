@@ -12,6 +12,7 @@ import pytest
 from pymongo import MongoClient
 
 from auth import db as auth_db
+import tickets.db as tickets_db
 
 
 _TEST_DB_NAME = "pr_chat_authtest"
@@ -38,8 +39,10 @@ def mongo_test_db():
     database = client[_TEST_DB_NAME]
     client.drop_database(_TEST_DB_NAME)  # clean slate at session start
     auth_db.use_database(database)
+    tickets_db.use_database(database)
     _point_chat_dal_at(database)
     auth_db.ensure_auth_indexes()
+    tickets_db.ensure_ticket_indexes()
     yield database
     client.drop_database(_TEST_DB_NAME)
     client.close()
@@ -52,4 +55,5 @@ def clean_collections(mongo_test_db):
     mongo_test_db.auth_sessions.delete_many({})
     mongo_test_db.sessions.delete_many({})
     mongo_test_db.messages.delete_many({})
+    mongo_test_db.tickets.delete_many({})
     yield

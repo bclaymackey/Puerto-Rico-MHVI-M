@@ -16,7 +16,51 @@ source .venv/bin/activate
 python MHVIM_Dashboard_App.py
 ```
 
+```bash
+Disable git push:
+git remote set-url --push origin DISABLED
+Enable  git push:
+git remote set-url --push origin https://github.com/bclaymackey/Puerto-Rico-MHVI-M.git
+Verify with:
+git remote -v
+```
+
 Open http://127.0.0.1:8050.
+
+## Choose the LLM provider
+
+Install Ollama and download the local model:
+
+```bash
+# Install the Python client
+pip install ollama
+
+# Download the local model
+ollama pull qwen3.5:9b
+
+# Confirm it is installed
+ollama list
+
+# Optional direct test
+ollama run qwen3.5:9b
+```
+
+Use the local model by setting the following values in `.env`:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen3.5:9b
+```
+
+Ollama runs locally and does not require an API key. To use the OpenAI path instead, set:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-5.6-luna
+OPENAI_API_KEY=your_key_here
+```
+
+Restart the dashboard after changing the provider or model in `.env`.
 
 ## Chat history
 
